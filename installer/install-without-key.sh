@@ -15,8 +15,7 @@ echo "$v1" >/etc/versin_script
 [[ ! -e /etc/versin_script ]] && echo 1 >/etc/versin_script
 v22=$(cat /etc/versin_script)
 vesaoSCT="\033[1;31m [ \033[1;32m($v22)\033[1;97m\033[1;31m ]"
-
-### COLORES Y BARRA
+### COLORS AND BAR
 msg() {
    BRAN='\033[1;37m' && RED='\e[31m' && GREEN='\e[32m' && YELLOW='\e[33m'
   BLUE='\e[34m' && MAGENTA='\e[35m' && MAG='\033[1;36m' && BLACK='\e[1m' && SEMCOR='\e[0m'
@@ -29,10 +28,9 @@ msg() {
   -bra) cor="${RED}" && echo -ne "${cor}${2}${SEMCOR}" ;;
   -nazu) cor="${COLOR[6]}${BLACK}" && echo -ne "${cor}${2}${SEMCOR}" ;;
   -gri) cor="\e[5m\033[1;100m" && echo -ne "${cor}${2}${SEMCOR}" ;;
-  "-bar2" | "-bar") cor="${RED}——————————————————————————————————————————————————" && echo -e "${SEMCOR}${cor}${SEMCOR}" ;;
+  "-bar2" | "-bar") cor="${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" && echo -e "${SEMCOR}${cor}${SEMCOR}" ;;
   esac
 }
-
 fun_bar() {
   comando="$1"
   _=$(
@@ -90,200 +88,13 @@ title() {
   msg -bar
 }
 
-# Función para instalar protocolos VPN automáticamente
-install_vpn_protocols() {
-  title -verd "INSTALANDO PROTOCOLOS VPN"
-  print_center -ama "Instalando protocolos VPN automáticamente..."
-  msg -bar
-  
-  # Verificar que existe la carpeta de protocolos
-  if [[ ! -d "/etc/VPS-AGN/protocols" ]]; then
-    mkdir -p /etc/VPS-AGN/protocols
-  fi
-  
-  # Arrays con los scripts
-  local dropbear_script="dropbear_auto.sh"
-  local parallel_scripts=("badvpn_auto.sh" "sockspy_auto.sh" "ssl_auto.sh" "install_agnudp.sh")
-  local parallel_names=("BadVPN UDP" "SocksIP Proxy" "SSL/TLS" "AGN UDP")
-  
-  # PASO 1: Instalar Dropbear primero
-  echo ""
-  print_center -azu "PASO 1/2: Instalando Dropbear SSH"
-  msg -bar
-  
-  if [[ -f "/etc/VPS-AGN/protocols/$dropbear_script" ]]; then
-    chmod +x "/etc/VPS-AGN/protocols/$dropbear_script"
-    
-    print_center -ama "Iniciando instalación de Dropbear SSH..."
-    
-    # Ejecutar dropbear con progreso real
-    /etc/VPS-AGN/protocols/$dropbear_script &
-    local dropbear_pid=$!
-    
-    # Mostrar progreso mientras se ejecuta
-    local counter=0
-    while kill -0 $dropbear_pid 2>/dev/null; do
-      counter=$((counter + 1))
-      local progress=$((counter * 2))
-      if [[ $progress -gt 100 ]]; then
-        progress=100
-      fi
-      printf "\r\033[1;33m[\033[1;32m"
-      local filled=$((progress * 40 / 100))
-      for ((i = 0; i < filled; i++)); do
-        printf "█"
-      done
-      printf "\033[1;37m"
-      for ((i = filled; i < 40; i++)); do
-        printf "░"
-      done
-      printf "\033[1;33m] \033[1;36m%d%% \033[1;97m- \033[1;93mDropbear SSH\033[0m" $progress
-      sleep 1
-    done
-    
-    wait $dropbear_pid
-    local dropbear_status=$?
-    
-    echo ""
-    if [[ $dropbear_status -eq 0 ]]; then
-      print_center -verd "✓ Dropbear SSH instalado correctamente"
-    else
-      print_center -verm "✗ Error al instalar Dropbear SSH"
-    fi
-  else
-    print_center -verm "✗ Script dropbear_auto.sh no encontrado"
-  fi
-  
-  msg -bar
-  print_center -ama "Esperando 6 segundos antes de continuar..."
-  
-  # Cuenta regresiva visual
-  for i in {6..1}; do
-    printf "\r\033[1;33mContinuando en: \033[1;31m%d \033[1;33msegundos...\033[0m" $i
-    sleep 1
-  done
-  echo ""
-  
-  # PASO 2: Instalar los otros 4 protocolos en paralelo
-  echo ""
-  print_center -azu "PASO 2/2: Instalando protocolos restantes en paralelo"
-  msg -bar
-  
-  # Crear array para almacenar PIDs
-  declare -a pids
-  declare -a status_files
-  
-  # Iniciar todos los scripts en paralelo
-  for ((i = 0; i < ${#parallel_scripts[@]}; i++)); do
-    local script="${parallel_scripts[i]}"
-    local name="${parallel_names[i]}"
-    
-    if [[ -f "/etc/VPS-AGN/protocols/$script" ]]; then
-      chmod +x "/etc/VPS-AGN/protocols/$script"
-      
-      # Crear archivo temporal para el estado
-      local status_file="/tmp/protocol_status_$i"
-      status_files[i]="$status_file"
-      
-      print_center -ama "Iniciando $name..."
-      
-      # Ejecutar en background y guardar estado
-      (
-        if /etc/VPS-AGN/protocols/$script &>/dev/null; then
-          echo "SUCCESS" > "$status_file"
-        else
-          echo "ERROR" > "$status_file"
-        fi
-      ) &
-      
-      pids[i]=$!
-    else
-      print_center -verm "✗ Script $script no encontrado"
-      status_files[i]="/tmp/not_found_$i"
-      echo "NOT_FOUND" > "/tmp/not_found_$i"
-    fi
-  done
-  
-  msg -bar
-  print_center -ama "Instalando protocolos en paralelo..."
-  
-  # Mostrar progreso general mientras se ejecutan
-  local all_done=false
-  local progress=0
-  while [[ "$all_done" != "true" ]]; do
-    local completed=0
-    local total=${#parallel_scripts[@]}
-    
-    # Contar cuántos han terminado
-    for pid in "${pids[@]}"; do
-      if ! kill -0 $pid 2>/dev/null; then
-        completed=$((completed + 1))
-      fi
-    done
-    
-    # Calcular progreso
-    if [[ $total -gt 0 ]]; then
-      progress=$((completed * 100 / total))
-    fi
-    
-    # Mostrar barra de progreso
-    printf "\r\033[1;33m[\033[1;32m"
-    local filled=$((progress * 40 / 100))
-    for ((i = 0; i < filled; i++)); do
-      printf "█"
-    done
-    printf "\033[1;37m"
-    for ((i = filled; i < 40; i++)); do
-      printf "░"
-    done
-    printf "\033[1;33m] \033[1;36m%d%% \033[1;97m- \033[1;93mInstalación en paralelo\033[0m" $progress
-    
-    # Verificar si todos terminaron
-    if [[ $completed -eq $total ]]; then
-      all_done=true
-    else
-      sleep 1
-    fi
-  done
-  
-  echo ""
-  msg -bar
-  
-  # Mostrar resultados
-  for ((i = 0; i < ${#parallel_scripts[@]}; i++)); do
-    local name="${parallel_names[i]}"
-    local status_file="${status_files[i]}"
-    
-    if [[ -f "$status_file" ]]; then
-      local status=$(cat "$status_file")
-      case $status in
-        "SUCCESS")
-          print_center -verd "✓ $name instalado correctamente"
-          ;;
-        "ERROR")
-          print_center -verm "✗ Error al instalar $name"
-          ;;
-        "NOT_FOUND")
-          print_center -verm "✗ Script de $name no encontrado"
-          ;;
-      esac
-      rm -f "$status_file"
-    fi
-  done
-  
-  msg -bar
-  print_center -verd "INSTALACIÓN DE PROTOCOLOS VPN COMPLETADA"
-  msg -bar
-  sleep 2
-}
-
 stop_install() {
-  title "INSTALACION CANCELADA"
+  title "INSTALLATION CANCELED"
   exit
 }
 
 time_reboot() {
-  print_center -ama "REINICIANDO VPS EN $1 SEGUNDOS"
+  print_center -ama "RESTARTING VPS IN $1 SECONDS"
   REBOOT_TIMEOUT="$1"
 
   while [ $REBOOT_TIMEOUT -gt 0 ]; do
@@ -314,21 +125,21 @@ dependencias() {
     for ((a = 0; a < $puntos; a++)); do
       pts+="."
     done
-    msg -nazu "    instalando $i$(msg -ama "$pts")"
+    msg -nazu "    installing $i$(msg -ama "$pts")"
     if apt install $i -y &>/dev/null; then
-      msg -verd " INSTALADO"
+      msg -verd " INSTALLED"
     else
       msg -verm2 " ERROR"
       sleep 2
       tput cuu1 && tput dl1
-      print_center -ama "aplicando corrección a $i"
+      print_center -ama "applying fix to $i"
       dpkg --configure -a &>/dev/null
       sleep 2
       tput cuu1 && tput dl1
 
-      msg -nazu "    instalando $i$(msg -ama "$pts")"
+      msg -nazu "    installing $i$(msg -ama "$pts")"
       if apt install $i -y &>/dev/null; then
-        msg -verd " INSTALADO"
+        msg -verd " INSTALLED"
       else
         msg -verm2 " ERROR"
       fi
@@ -338,23 +149,23 @@ dependencias() {
 
 post_reboot() {
   echo 'wget -O /root/install.sh "https://raw.githubusercontent.com/juanitoprosniff/script_msyvpn/master/installer/install-without-key.sh"; clear; sleep 2; chmod +x /root/install.sh; /root/install.sh --continue' >>/root/.bashrc
-  title -verd "ACTUALIZACIÓN DEL SISTEMA COMPLETADA"
-  print_center -ama "La instalación continuará\ndespués del reinicio!!!"
+  title -verd "COMPLETED SYSTEM UPGRADE"
+  print_center -ama "The installation will continue\nafter rebooting!!!"
   msg -bar
 }
 
 install_start() {
   msg -bar
-  echo -e "\e[1;97m           \e[5m\033[1;100m   ACTUALIZACIÓN DEL SISTEMA   \033[1;37m"
+  echo -e "\e[1;97m           \e[5m\033[1;100m   SYSTEM UPDATE   \033[1;37m"
   msg -bar
-  print_center -ama "Los paquetes del sistema se están actualizando.\n Puede tomar un tiempo y pedir algunas confirmaciones.\n"
+  print_center -ama "System packages are updating.\n It may take a while and ask for some confirmations.\n"
   msg -bar3
-  msg -ne "\n ¿Desea continuar? [Y/N]: "
+  msg -ne "\n Do you wish to continue? [Y/N]: "
   read opcion
-  [[ "$opcion" != @(y|Y|s|S) ]] && stop_install
+  [[ "$opcion" != @(y|Y) ]] && stop_install
   clear && clear
   msg -bar
-  echo -e "\e[1;97m           \e[5m\033[1;100m   ACTUALIZACIÓN DEL SISTEMA   \033[1;37m"
+  echo -e "\e[1;97m           \e[5m\033[1;100m   SYSTEM UPDATE   \033[1;37m"
   msg -bar
   os_system
   apt update -y
@@ -364,21 +175,111 @@ install_start() {
 install_continue() {
   os_system
   msg -bar
-  echo -e "      \e[5m\033[1;100m   COMPLETANDO PAQUETES PARA EL SCRIPT   \033[1;37m"
+  echo -e "      \e[5m\033[1;100m   COMPLETING PACKAGES FOR THE SCRIPT   \033[1;37m"
   msg -bar
   print_center -ama "$distro $vercion"
-  print_center -verd "INSTALANDO DEPENDENCIAS"
+  print_center -verd "INSTALLING DEPENDENCIES"
   msg -bar3
   dependencias
   msg -bar3
-  print_center -azu "Eliminando paquetes obsoletos"
+  print_center -azu "Removing obsolete packages"
   apt autoremove -y &>/dev/null
   sleep 2
   tput cuu1 && tput dl1
   msg -bar
-  print_center -ama "Si alguna de las dependencias falla!!!\nal finalizar, puedes intentar instalar\nla misma manualmente usando el siguiente comando\napt install nombre_del_paquete"
+  print_center -ama "If some of the dependencies fail!!!\nwhen finished, you can try to install\nthe same manually using the following command\napt install package_name"
   msg -bar
-  read -t 60 -n 1 -rsp $'\033[1;39m       << Presiona enter para continuar >>\n'
+  read -t 60 -n 1 -rsp $'\033[1;39m       << Press enter to continue >>\n'
+}
+
+# Función para instalar protocolos VPN
+install_vpn_protocols() {
+  title "INSTALLING VPN PROTOCOLS"
+  
+  # Lista de scripts en orden de ejecución
+  declare -a protocol_scripts=(
+    "dropbear_auto.sh"
+    "badvpn_auto.sh" 
+    "sockspy_auto.sh"
+    "ssl_auto.sh"
+    "install_agnudp.sh"
+  )
+  
+  # Lista de nombres descriptivos para mostrar
+  declare -a protocol_names=(
+    "DROPBEAR SSH"
+    "BADVPN UDP"
+    "SOCKSPY PROXY"
+    "SSL STUNNEL"
+    "AGN UDP PROTOCOL"
+  )
+  
+  protocols_dir="/etc/VPS-AGN/protocols"
+  
+  # Verificar que la carpeta protocols existe
+  if [[ ! -d "$protocols_dir" ]]; then
+    msg -verm "ERROR: Protocols directory not found at $protocols_dir"
+    print_center -ama "Please ensure the protocols folder exists with the required scripts"
+    return 1
+  fi
+  
+  print_center -verd "Starting VPN Protocols Installation"
+  msg -bar
+  
+  # Ejecutar cada script en orden
+  for i in "${!protocol_scripts[@]}"; do
+    script_name="${protocol_scripts[$i]}"
+    protocol_name="${protocol_names[$i]}"
+    script_path="$protocols_dir/$script_name"
+    
+    print_center -ama "Installing: $protocol_name"
+    msg -nazu "    Executing $script_name$(msg -ama "...")"
+    
+    if [[ -f "$script_path" ]]; then
+      chmod +x "$script_path"
+      
+      # Ejecutar el script y capturar el resultado
+      if bash "$script_path" &>/dev/null; then
+        msg -verd " INSTALLED"
+        sleep 1
+      else
+        msg -verm " ERROR"
+        print_center -ama "Failed to install $protocol_name"
+        print_center -ama "You can try to install it manually later"
+        sleep 2
+      fi
+    else
+      msg -verm " NOT FOUND"
+      print_center -ama "Script $script_name not found in $protocols_dir"
+      print_center -ama "Skipping $protocol_name installation"
+      sleep 2
+    fi
+    
+    # Pequeña pausa entre instalaciones
+    sleep 1
+  done
+  
+  msg -bar
+  print_center -verd "VPN PROTOCOLS INSTALLATION COMPLETED"
+  msg -bar
+  
+  # Mostrar resumen de servicios instalados
+  print_center -ama "Protocol Services Status:"
+  echo ""
+  
+  # Verificar servicios activos (puedes personalizar según tus servicios)
+  services_to_check=("dropbear" "badvpn" "stunnel4")
+  
+  for service in "${services_to_check[@]}"; do
+    if systemctl is-active --quiet "$service" 2>/dev/null; then
+      print_center -verd "$service: ACTIVE"
+    else
+      print_center -ama "$service: INACTIVE"
+    fi
+  done
+  
+  msg -bar
+  read -t 30 -n 1 -rsp $'\033[1;39m    << Press enter to continue (30s timeout) >>\n'
 }
 
 while :; do
@@ -390,26 +291,30 @@ while :; do
     install_continue
     break
     ;;
+  # -u | --update)
+  #   install_start
+  #   install_continue
+  #   break
+  # ;;
   *) exit ;;
   esac
 done
 
 clear && clear
 msg -bar2
-echo -e " \e[5m\033[1;100m   =====>> ►► ⚡ MSY VPN SCRIPT ⚡ ◄◄ <<=====   \033[1;37m"
+echo -e " \e[5m\033[1;100m   =====>> ►► ¡ MSY VPN SCRIPT ¡ ◄◄ <<=====   \033[1;37m"
 msg -bar2
-print_center -ama "LISTA DE SCRIPTS DISPONIBLES"
+print_center -ama "AVAILABLE SCRIPT LIST"
 msg -bar
-
 #-BASH SOPORTE ONLINE
 wget https://raw.githubusercontent.com/juanitoprosniff/script_msyvpn/master/LINKS-LIBRARIES/SPR.sh -O /usr/bin/SPR >/dev/null 2>&1
 chmod +x /usr/bin/SPR
 
-#VPS-AGN 8.6 OFICIAL
+#VPS-AGN 8.6 OFFICIAL
 install_official() {
   clear && clear
   msg -bar
-  echo -ne "\033[1;97m Escribe tu eslogan: \033[1;32m" && read slogan
+  echo -ne "\033[1;97m Type your slogan: \033[1;32m" && read slogan
   tput cuu1 && tput dl1
   echo -e "$slogan"
   msg -bar
@@ -446,7 +351,6 @@ install_official() {
   [[ ! -d /etc/VPS-AGN/Slow/install ]] && mkdir /etc/VPS-AGN/Slow/install
   [[ ! -d /etc/VPS-AGN/Slow/Key ]] && mkdir /etc/VPS-AGN/Slow/Key
   [[ ! -d /etc/VPS-AGN/protocols ]] && mkdir /etc/VPS-AGN/protocols
-  
   touch /usr/share/lognull &>/dev/null
   wget -O /bin/resetsshdrop https://raw.githubusercontent.com/juanitoprosniff/script_msyvpn/master/LINKS-LIBRARIES/resetsshdrop &>/dev/null
   chmod +x /bin/resetsshdrop
@@ -474,42 +378,46 @@ install_official() {
   echo 'echo "" ' >>.bashrc
   echo 'mess1="$(less /etc/VPS-AGN/message.txt)" ' >>.bashrc
   echo 'echo "" ' >>.bashrc
-  echo 'echo -e "\t\033[92mREVENDEDOR : $mess1 "' >>.bashrc
-  echo 'echo -e "\t\e[1;33mVERSIÓN: \e[1;31m$(cat /etc/versin_script_new)"' >>.bashrc
+  echo 'echo -e "\t\033[92mRESELLER : $mess1 "' >>.bashrc
+  echo 'echo -e "\t\e[1;33mVERSION: \e[1;31m$(cat /etc/versin_script_new)"' >>.bashrc
   echo 'echo "" ' >>.bashrc
-  echo 'echo -e "\t\033[97mPARA MOSTRAR EL PANEL BASH ESCRIBE: sudo VPSAGN o menu "' >>.bashrc
+  echo 'echo -e "\t\033[97mTO DISPLAY BASH PANEL TYPE: sudo VPSAGN or menu "' >>.bashrc
   echo 'echo ""' >>.bashrc
   rm -rf /usr/bin/pytransform &>/dev/null
   rm -rf VPS-AGN.sh
   rm -rf lista-arq
   service ssh restart &>/dev/null
   
-  # Instalar protocolos VPN automáticamente
+  # AQUÍ SE EJECUTA LA INSTALACIÓN DE PROTOCOLOS VPN
+  clear && clear
   install_vpn_protocols
   
   clear && clear
   msg -bar
-  echo -e "\e[1;92m             >> INSTALACIÓN COMPLETADA <<" && msg bar2
-  echo -e "      COMANDO PRINCIPAL PARA INGRESAR AL PANEL "
+  echo -e "\e[1;92m             >> INSTALLATION COMPLETED <<" && msg bar2
+  echo -e "      MAIN COMMAND TO ENTER THE PANEL "
   echo -e "                      \033[1;41m  menu  \033[0;37m" && msg -bar2
-  print_center -verd "TODOS LOS PROTOCOLOS VPN HAN SIDO INSTALADOS AUTOMÁTICAMENTE"
+  
+  # Mostrar información de protocolos instalados
+  print_center -ama "VPN PROTOCOLS INSTALLED:"
+  print_center -verd "• Dropbear SSH"
+  print_center -verd "• BadVPN UDP"
+  print_center -verd "• SocksPy Proxy"
+  print_center -verd "• SSL Stunnel"
+  print_center -verd "• AGN UDP Protocol"
   msg -bar
 }
 
-#MENÚS
+#MENUS
 /bin/cp /etc/skel/.bashrc ~/
 /bin/cp /etc/skel/.bashrc /etc/bash.bashrc
-echo -ne " \e[1;93m [\e[1;32m1\e[1;93m]\033[1;31m > \e[1;97m INSTALAR 8.5x OFICIAL \e[97m \n"
+echo -ne " \e[1;93m [\e[1;32m1\e[1;93m]\033[1;31m > \e[1;97m INSTALL 8.5x OFFICIAL \e[97m \n"
 msg -bar
-echo -ne "\033[1;97mIngresa solo el número según tu respuesta:\e[32m "
+echo -ne "\033[1;97mEnter only the number according to your answer:\e[32m "
 read opcao
 case $opcao in
 1)
   install_official
-  ;;
-*)
-  print_center -verm "Opción no válida"
-  exit 1
   ;;
 esac
 exit
