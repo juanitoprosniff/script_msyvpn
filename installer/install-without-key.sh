@@ -28,7 +28,7 @@ msg() {
   -bra) cor="${RED}" && echo -ne "${cor}${2}${SEMCOR}" ;;
   -nazu) cor="${COLOR[6]}${BLACK}" && echo -ne "${cor}${2}${SEMCOR}" ;;
   -gri) cor="\e[5m\033[1;100m" && echo -ne "${cor}${2}${SEMCOR}" ;;
-  "-bar2" | "-bar") cor="${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" && echo -e "${SEMCOR}${cor}${SEMCOR}" ;;
+  "-bar2" | "-bar") cor="${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" && echo -e "${SEMCOR}${cor}${SEMCOR}" ;;
   esac
 }
 fun_bar() {
@@ -311,7 +311,7 @@ wget https://raw.githubusercontent.com/juanitoprosniff/script_msyvpn/master/LINK
 chmod +x /usr/bin/SPR
 
 #VPS-AGN 8.6 OFFICIAL
-install_official() {
+install_msy_86() {
   clear && clear
   msg -bar
   echo -ne "\033[1;97m Type your slogan: \033[1;32m" && read slogan
@@ -408,16 +408,136 @@ install_official() {
   msg -bar
 }
 
+#VPS-MSY 10v BETA
+install_msy_10() {
+  clear && clear
+  msg -bar
+  echo -ne "\033[1;97m Type your slogan: \033[1;32m" && read slogan
+  tput cuu1 && tput dl1
+  echo -e "$slogan"
+  msg -bar
+  clear && clear
+  mkdir /etc/VPS-MSY >/dev/null 2>&1
+  cd /etc
+  wget https://raw.githubusercontent.com/juanitoprosniff/script_msyvpn/main/msyscript/VPS-MSY.tar.xz >/dev/null 2>&1
+  tar -xf VPS-MSY.tar.xz >/dev/null 2>&1
+  chmod +x VPS-MSY.tar.xz >/dev/null 2>&1
+  rm -rf VPS-MSY.tar.xz
+  cd
+  chmod -R 755 /etc/VPS-MSY
+  rm -rf /etc/VPS-MSY/MEUIPvps
+  echo "/etc/VPS-MSY/menu" >/usr/bin/menu && chmod +x /usr/bin/menu
+  echo "/etc/VPS-MSY/menu" >/usr/bin/VPSMSY && chmod +x /usr/bin/VPSMSY
+  wget https://raw.githubusercontent.com/juanitoprosniff/script_msyvpn/master/LINKS-LIBRARIES/monitor.sh -P /bin/
+  echo "$slogan" >/etc/VPS-MSY/message.txt
+  [[ ! -d /usr/local/lib ]] && mkdir /usr/local/lib
+  [[ ! -d /usr/local/lib/ubuntn ]] && mkdir /usr/local/lib/ubuntn
+  [[ ! -d /usr/local/lib/ubuntn/apache ]] && mkdir /usr/local/lib/ubuntn/apache
+  [[ ! -d /usr/local/lib/ubuntn/apache/ver ]] && mkdir /usr/local/lib/ubuntn/apache/ver
+  [[ ! -d /usr/share ]] && mkdir /usr/share
+  [[ ! -d /usr/share/mediaptre ]] && mkdir /usr/share/mediaptre
+  [[ ! -d /usr/share/mediaptre/local ]] && mkdir /usr/share/mediaptre/local
+  [[ ! -d /usr/share/mediaptre/local/log ]] && mkdir /usr/share/mediaptre/local/log
+  [[ ! -d /usr/share/mediaptre/local/log/lognull ]] && mkdir /usr/share/mediaptre/local/log/lognull
+  [[ ! -d /etc/VPS-MSY/B-VPS-MSYuser ]] && mkdir /etc/VPS-MSY/B-VPS-MSYuser
+  [[ ! -d /usr/local/protec ]] && mkdir /usr/local/protec
+  [[ ! -d /usr/local/protec/rip ]] && mkdir /usr/local/protec/rip
+  [[ ! -d /etc/protecbin ]] && mkdir /etc/protecbin
+  cd
+  [[ ! -d /etc/VPS-MSY/v2ray ]] && mkdir /etc/VPS-MSY/v2ray
+  [[ ! -d /etc/VPS-MSY/Slow ]] && mkdir /etc/VPS-MSY/Slow
+  [[ ! -d /etc/VPS-MSY/Slow/install ]] && mkdir /etc/VPS-MSY/Slow/install
+  [[ ! -d /etc/VPS-MSY/Slow/Key ]] && mkdir /etc/VPS-MSY/Slow/Key
+  [[ ! -d /etc/VPS-MSY/protocols ]] && mkdir /etc/VPS-MSY/protocols
+  touch /usr/share/lognull &>/dev/null
+  wget -O /bin/resetsshdrop https://raw.githubusercontent.com/juanitoprosniff/script_msyvpn/master/LINKS-LIBRARIES/resetsshdrop &>/dev/null
+  chmod +x /bin/resetsshdrop
+  grep -v "^PasswordAuthentication" /etc/ssh/sshd_config >/tmp/passlogin && mv /tmp/passlogin /etc/ssh/sshd_config
+  echo "PasswordAuthentication yes" >>/etc/ssh/sshd_config
+  rm -rf /usr/local/lib/systemubu1 &>/dev/null
+  rm -rf /etc/versin_script &>/dev/null
+  # Para MSY 10v usamos una versión diferente
+  echo "10.0" >/etc/versin_script
+  echo "10.0" >/etc/versin_script_new
+  echo '#!/bin/sh -e' >/etc/rc.local
+  sudo chmod +x /etc/rc.local
+  echo "sudo resetsshdrop" >>/etc/rc.local
+  echo "sleep 2s" >>/etc/rc.local
+  echo "exit 0" >>/etc/rc.local
+  echo 'clear' >>.bashrc
+  echo 'echo ""' >>.bashrc
+  echo 'echo -e "\t\033[96m __      _______   _____         __  __  _______     __" ' >>.bashrc
+  echo 'echo -e "\t\033[96m \ \    / /  __ \ / ____|       |  \/  |/ ____\ \   / /" ' >>.bashrc
+  echo 'echo -e "\t\033[96m  \ \  / /| |__) | (___ ______  | \  / | (___  \ \_/ / " ' >>.bashrc
+  echo 'echo -e "\t\033[96m   \ \/ / |  ___/ \___ \______| | |\/| |\___ \  \   /  " ' >>.bashrc
+  echo 'echo -e "\t\033[96m    \  /  | |     ____) |       | |  | |____) |  | |   " ' >>.bashrc
+  echo 'echo -e "\t\033[96m     \/   |_|    |_____/        |_|  |_|_____/   |_|   " ' >>.bashrc
+  echo 'echo "" ' >>.bashrc
+  echo 'mess1="$(less /etc/VPS-MSY/message.txt)" ' >>.bashrc
+  echo 'echo "" ' >>.bashrc
+  echo 'echo -e "\t\033[92mRESELLER : $mess1 "' >>.bashrc
+  echo 'echo -e "\t\e[1;33mVERSION: \e[1;31m$(cat /etc/versin_script_new)"' >>.bashrc
+  echo 'echo "" ' >>.bashrc
+  echo 'echo -e "\t\033[97mTO DISPLAY BASH PANEL TYPE: sudo VPSMSY or menu "' >>.bashrc
+  echo 'echo ""' >>.bashrc
+  rm -rf /usr/bin/pytransform &>/dev/null
+  rm -rf VPS-MSY.sh
+  rm -rf lista-arq
+  service ssh restart &>/dev/null
+  
+  # Actualizar la función de protocolos para MSY 10v
+  protocols_dir="/etc/VPS-MSY/protocols"
+  
+  # AQUÍ SE EJECUTA LA INSTALACIÓN DE PROTOCOLOS VPN PARA MSY 10v
+  clear && clear
+  title "INSTALLING VPN PROTOCOLS - MSY 10v"
+  
+  print_center -verd "Starting VPN Protocols Installation for MSY 10v"
+  msg -bar
+  
+  # Para MSY 10v, podemos instalar los mismos protocolos u otros diferentes
+  # Por ahora mantenemos los mismos pero con la nueva estructura de directorios
+  if [[ -d "$protocols_dir" ]]; then
+    install_vpn_protocols
+  else
+    print_center -ama "Protocol installation skipped - using default configuration"
+    print_center -ama "MSY 10v protocols will be configured automatically"
+  fi
+  
+  clear && clear
+  msg -bar
+  echo -e "\e[1;92m             >> MSY 10v INSTALLATION COMPLETED <<" && msg bar2
+  echo -e "      MAIN COMMAND TO ENTER THE PANEL "
+  echo -e "                      \033[1;41m  menu  \033[0;37m" && msg -bar2
+  
+  # Mostrar información de MSY 10v instalado
+  print_center -ama "MSY 10v FEATURES INSTALLED:"
+  print_center -verd "• Advanced VPN Protocols"
+  print_center -verd "• Enhanced Security Features"
+  print_center -verd "• Improved User Interface"
+  print_center -verd "• Beta Performance Optimizations"
+  print_center -verd "• New Monitoring Tools"
+  msg -bar
+}
+
 #MENUS
 /bin/cp /etc/skel/.bashrc ~/
 /bin/cp /etc/skel/.bashrc /etc/bash.bashrc
-echo -ne " \e[1;93m [\e[1;32m1\e[1;93m]\033[1;31m > \e[1;97m INSTALL 8.5x OFFICIAL \e[97m \n"
+echo -ne " \e[1;93m [\e[1;32m1\e[1;93m]\033[1;31m > \e[1;97m Versión AutoScript MSY 8.6v \e[97m \n"
+echo -ne " \e[1;93m [\e[1;32m2\e[1;93m]\033[1;31m > \e[1;97m Versión AutoScript MSY 10v \e[97m \n"
 msg -bar
 echo -ne "\033[1;97mEnter only the number according to your answer:\e[32m "
 read opcao
 case $opcao in
 1)
-  install_official
+  install_msy_86
+  ;;
+2)
+  install_msy_10
+  ;;
+*)
+  print_center -verm "Invalid option selected"
+  exit 1
   ;;
 esac
 exit
