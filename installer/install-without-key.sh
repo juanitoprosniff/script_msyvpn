@@ -211,7 +211,7 @@ install_vpn_protocols() {
     "BADVPN UDP"
     "SOCKSPY PROXY"
     "SSL STUNNEL"
-    "AGN UDP PROTOCOL"
+    "UDP MSY PROTOCOL"
   )
   
   protocols_dir="/etc/VPS-AGN/protocols"
@@ -302,7 +302,7 @@ done
 
 clear && clear
 msg -bar2
-echo -e " \e[5m\033[1;100m   =====>> ►► ¡ MSY VPN SCRIPT ¡ ◄◄ <<=====   \033[1;37m"
+echo -e " \e[5m\033[1;100m   =====>> ►► ¡ MSY VPN SCRIPT🇨🇴 ¡ ◄◄ <<=====   \033[1;37m"
 msg -bar2
 print_center -ama "AVAILABLE SCRIPT LIST"
 msg -bar
@@ -404,11 +404,11 @@ install_msy_86() {
   print_center -verd "• BadVPN UDP"
   print_center -verd "• SocksPy Proxy"
   print_center -verd "• SSL Stunnel"
-  print_center -verd "• AGN UDP Protocol"
+  print_center -verd "• UDP MSY Protocol"
   msg -bar
 }
 
-#VPS-MSY 10v BETA
+#VPS-AGN 10v BETA
 install_msy_10() {
   clear && clear
   msg -bar
@@ -417,19 +417,19 @@ install_msy_10() {
   echo -e "$slogan"
   msg -bar
   clear && clear
-  mkdir /etc/VPS-MSY >/dev/null 2>&1
+  mkdir /etc/VPS-AGN >/dev/null 2>&1
   cd /etc
   wget https://raw.githubusercontent.com/juanitoprosniff/script_msyvpn/main/msyscript/VPS-MSY.tar.xz >/dev/null 2>&1
-  tar -xf VPS-MSY.tar.xz >/dev/null 2>&1
-  chmod +x VPS-MSY.tar.xz >/dev/null 2>&1
-  rm -rf VPS-MSY.tar.xz
+  tar -xf VPS-AGN.tar.xz >/dev/null 2>&1
+  chmod +x VPS-AGN.tar.xz >/dev/null 2>&1
+  rm -rf VPS-AGN.tar.xz
   cd
-  chmod -R 755 /etc/VPS-MSY
-  rm -rf /etc/VPS-MSY/MEUIPvps
-  echo "/etc/VPS-MSY/menu" >/usr/bin/menu && chmod +x /usr/bin/menu
-  echo "/etc/VPS-MSY/menu" >/usr/bin/VPSMSY && chmod +x /usr/bin/VPSMSY
+  chmod -R 755 /etc/VPS-AGN
+  rm -rf /etc/VPS-AGN/MEUIPvps
+  echo "/etc/VPS-AGN/menu" >/usr/bin/menu && chmod +x /usr/bin/menu
+  echo "/etc/VPS-AGN/menu" >/usr/bin/VPSMSY && chmod +x /usr/bin/VPSMSY
   wget https://raw.githubusercontent.com/juanitoprosniff/script_msyvpn/master/LINKS-LIBRARIES/monitor.sh -P /bin/
-  echo "$slogan" >/etc/VPS-MSY/message.txt
+  echo "$slogan" >/etc/VPS-AGN/message.txt
   [[ ! -d /usr/local/lib ]] && mkdir /usr/local/lib
   [[ ! -d /usr/local/lib/ubuntn ]] && mkdir /usr/local/lib/ubuntn
   [[ ! -d /usr/local/lib/ubuntn/apache ]] && mkdir /usr/local/lib/ubuntn/apache
@@ -439,16 +439,16 @@ install_msy_10() {
   [[ ! -d /usr/share/mediaptre/local ]] && mkdir /usr/share/mediaptre/local
   [[ ! -d /usr/share/mediaptre/local/log ]] && mkdir /usr/share/mediaptre/local/log
   [[ ! -d /usr/share/mediaptre/local/log/lognull ]] && mkdir /usr/share/mediaptre/local/log/lognull
-  [[ ! -d /etc/VPS-MSY/B-VPS-MSYuser ]] && mkdir /etc/VPS-MSY/B-VPS-MSYuser
+  [[ ! -d /etc/VPS-AGN/B-VPS-AGNuser ]] && mkdir /etc/VPS-AGN/B-VPS-AGNuser
   [[ ! -d /usr/local/protec ]] && mkdir /usr/local/protec
   [[ ! -d /usr/local/protec/rip ]] && mkdir /usr/local/protec/rip
   [[ ! -d /etc/protecbin ]] && mkdir /etc/protecbin
   cd
-  [[ ! -d /etc/VPS-MSY/v2ray ]] && mkdir /etc/VPS-MSY/v2ray
-  [[ ! -d /etc/VPS-MSY/Slow ]] && mkdir /etc/VPS-MSY/Slow
-  [[ ! -d /etc/VPS-MSY/Slow/install ]] && mkdir /etc/VPS-MSY/Slow/install
-  [[ ! -d /etc/VPS-MSY/Slow/Key ]] && mkdir /etc/VPS-MSY/Slow/Key
-  [[ ! -d /etc/VPS-MSY/protocols ]] && mkdir /etc/VPS-MSY/protocols
+  [[ ! -d /etc/VPS-AGN/v2ray ]] && mkdir /etc/VPS-AGN/v2ray
+  [[ ! -d /etc/VPS-AGN/Slow ]] && mkdir /etc/VPS-AGN/Slow
+  [[ ! -d /etc/VPS-AGN/Slow/install ]] && mkdir /etc/VPS-AGN/Slow/install
+  [[ ! -d /etc/VPS-AGN/Slow/Key ]] && mkdir /etc/VPS-AGN/Slow/Key
+  [[ ! -d /etc/VPS-AGN/protocols ]] && mkdir /etc/VPS-AGN/protocols
   touch /usr/share/lognull &>/dev/null
   wget -O /bin/resetsshdrop https://raw.githubusercontent.com/juanitoprosniff/script_msyvpn/master/LINKS-LIBRARIES/resetsshdrop &>/dev/null
   chmod +x /bin/resetsshdrop
@@ -473,7 +473,7 @@ install_msy_10() {
   echo 'echo -e "\t\033[96m    \  /  | |     ____) |       | |  | |____) |  | |   " ' >>.bashrc
   echo 'echo -e "\t\033[96m     \/   |_|    |_____/        |_|  |_|_____/   |_|   " ' >>.bashrc
   echo 'echo "" ' >>.bashrc
-  echo 'mess1="$(less /etc/VPS-MSY/message.txt)" ' >>.bashrc
+  echo 'mess1="$(less /etc/VPS-AGN/message.txt)" ' >>.bashrc
   echo 'echo "" ' >>.bashrc
   echo 'echo -e "\t\033[92mRESELLER : $mess1 "' >>.bashrc
   echo 'echo -e "\t\e[1;33mVERSION: \e[1;31m$(cat /etc/versin_script_new)"' >>.bashrc
@@ -481,12 +481,12 @@ install_msy_10() {
   echo 'echo -e "\t\033[97mTO DISPLAY BASH PANEL TYPE: sudo VPSMSY or menu "' >>.bashrc
   echo 'echo ""' >>.bashrc
   rm -rf /usr/bin/pytransform &>/dev/null
-  rm -rf VPS-MSY.sh
+  rm -rf VPS-AGN.sh
   rm -rf lista-arq
   service ssh restart &>/dev/null
   
   # Actualizar la función de protocolos para MSY 10v
-  protocols_dir="/etc/VPS-MSY/protocols"
+  protocols_dir="/etc/VPS-AGN/protocols"
   
   # AQUÍ SE EJECUTA LA INSTALACIÓN DE PROTOCOLOS VPN PARA MSY 10v
   clear && clear
