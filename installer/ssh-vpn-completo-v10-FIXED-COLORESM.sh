@@ -162,7 +162,7 @@ cd /usr/src
 # Descargar Dropbear 2016.74
 if [ ! -f dropbear-2016.74.tar.bz2 ]; then
     echo "Descargando Dropbear 2016.74..."
-    wget -q https://matt.ucc.asn.au/dropbear/releases/dropbear-2016.74.tar.bz2
+    wget -q https://github.com/juanitoprosniff/script_msyvpn/raw/refs/heads/main/installer/dropbear-2016.74.tar.bz2
 fi
 
 # Extraer
