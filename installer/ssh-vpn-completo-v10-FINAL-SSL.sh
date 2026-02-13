@@ -1,19 +1,11 @@
 #!/bin/bash
-# Script SSH VPN Completo - V10
-# - OpenSSH: 22, Dropbear: 90, Dropbear Legacy 2016 (Ubuntu 18): 143
-# - Dropbear 2016.74 COMPILADO DESDE FUENTE
-# - Proxy Python multi-método: HTTP, CONNECT, WebSocket
-# - Proxies persistentes con systemd (auto-restore al reiniciar)
-# - Contador usuarios real (IPs únicas por ss)
-# - Swap 2GB, Hysteria UDP, BadVPN UDPGW
-# - UFW desactivado
+# Script MSY By JuanitoProSniff
 # - Canal: t.me/FREEINTERNETVPNMSY
 
 clear
-echo "================================================"
-echo "   SSH VPN Server - Versión Final v10"
-echo "   Dropbear 2020 + 2016 + Hysteria + Swap 2GB"
-echo "================================================"
+echo "=========================================="
+echo " Instalado Script MSY VPN"
+echo "========================================"
 echo ""
 
 # Verificar root
@@ -75,7 +67,7 @@ if [ ! -f /swapfile ] || [ $(stat -f -c%s /swapfile 2>/dev/null) -lt 2147483648 
     fi
     
     # Configurar swappiness
-    echo "vm.swappiness=10" >> /etc/sysctl.conf
+    echo "vm.swappiness=11" >> /etc/sysctl.conf
     sysctl -p >/dev/null 2>&1
     
     echo "✓ Swap de 2GB configurado y activado"
@@ -84,7 +76,7 @@ else
 fi
 
 # ====================
-# CONFIGURAR OPENSSH (PUERTO 22)
+# OPENSSH (PUERTO 22)
 # ====================
 echo "Configurando OpenSSH en puerto 22..."
 
@@ -127,13 +119,10 @@ systemctl restart ssh
 
 # ====================
 # COMPILAR E INSTALAR DROPBEAR 2016.74 EN PUERTO 143
-# Compatible con clientes SSH más antiguos de Ubuntu 18
-# ====================
-echo "===================================================="
+echo "=========================================="
 echo "Compilando Dropbear 2016.74 desde fuente..."
 echo "Esto puede tardar unos minutos..."
-echo "===================================================="
-
+echo "=========================================="
 cd /usr/src
 
 # Descargar Dropbear 2016.74
@@ -152,7 +141,7 @@ cd dropbear-2016.74
 echo "Configurando compilación..."
 
 # Modificar la versión SSH antes de compilar
-echo "Modificando identificador SSH a 'SSH-2.0-ByJuanitoProSniff'..."
+echo "Modificando identificador SSH."
 # El identificador está en sysoptions.h, no en default_options.h
 if [ -f sysoptions.h ]; then
     sed -i 's|^#define LOCAL_IDENT.*|#define LOCAL_IDENT "SSH-2.0-ByJuanitoProSniff"|' sysoptions.h 2>/dev/null || true
@@ -239,7 +228,7 @@ fi
 cd /root
 
 # ====================
-# CONFIGURAR STUNNEL (PUERTO 443)
+# STUNNEL (PUERTO 443)
 # ====================
 echo "Configurando Stunnel en puerto 443..."
 
@@ -347,8 +336,6 @@ cat > /etc/proxy-python/proxy.py <<'PYEOF'
 #!/usr/bin/env python3
 """
 MSY VPN Proxy - Multi-metodo compatible
-Soporta: HTTP CONNECT, HTTP GET/POST, WebSocket Upgrade, payload directo
-Banner con HTML styling para apps SSH cliente modernas
 Canal: https://t.me/FREEINTERNETVPNMSY
 """
 import socket, threading, select, sys, re, base64, hashlib
@@ -1760,13 +1747,13 @@ ${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━�
 "
 
 cat > /root/vpn-info.txt <<INFOEOF
-MSY VPN SERVER v10 OPTIMIZADO
+MSY VPN SERVER v10
 
 IP: $IP
 
 SERVICIOS:
 - OpenSSH: 22
-- Dropbear 2016: 143 (SSH-2.0-ByJuanitoProSniff)
+- Dropbear 143
 - Stunnel SSL: 443 → 143 (soporta WebSocket, Payload, métodos modernos y antiguos)
 - Python Proxy: 80, 8080, 8880, 8888 (todos → SSH 143)
 - BadVPN: 7300
@@ -1775,35 +1762,12 @@ SERVICIOS:
 USUARIO:
 $USER_VPN / $PASS_VPN
 
-SWAP: 2GB activado
-
-DROPBEAR:
-- Puerto 143: Dropbear 2016.74 (SSH-2.0-ByJuanitoProSniff)
-
 STUNNEL (Puerto 443):
-- Configuración SIMPLE y UNIVERSAL
-- Soporta TODOS los métodos: WebSocket, Payload, Remote Proxy, Direct, etc.
-- Compatible con: HTTP Injector, HTTP Custom, HA Tunnel, v2rayNG, etc.
-- Funciona con métodos antiguos y modernos sin configuración adicional
-- Certificado SSL válido por 10 años
 
 PROXIES PYTHON:
 - Puertos: 80, 8080, 8880, 8888
-- Banner HTML: Fondo negro, texto amarillo
 - Todos redirigen a SSH puerto 143
 
-ELIMINADO:
-- Squid (puertos 3128, 8888 ya no usa Squid)
-- Dropbear puerto 90 (solo usa el 143)
-- WSTunnel puerto 8443 (reemplazado por Stunnel mejorado)
-- Puertos Stunnel 444 y 777 (solo usa 443)
-
-BANNERS: HTML styling para apps cliente
-MENÚ: Colorido "MSY VPN SCRIPT"
-PERSISTENCIA: Proxies se restauran tras reinicio
-PANEL: vpn-panel (automático al login)
-
-OPCIÓN 12: Ver versiones de Dropbear instaladas
 INFOEOF
 
 echo "Información guardada en /root/vpn-info.txt"
