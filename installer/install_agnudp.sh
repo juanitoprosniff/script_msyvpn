@@ -8,7 +8,7 @@
 set -e
 
 # Domain Name
-DOMAIN="udp.msyvpn.online"
+DOMAIN="juaniroprosniff.site"
 
 # PROTOCOL
 PROTOCOL="udp"
@@ -541,8 +541,8 @@ EOF
         echo "Database setup completed successfully. Table 'users' exists."
         
         # Add a default user if not already exists
-        default_username="default"
-        default_password="password"
+        default_username="WANI"
+        default_password="@FREEINTERNETVPNMSY"
         user_exists=$(sqlite3 "$USER_DB" "SELECT username FROM users WHERE username='$default_username';")
         
         if [[ -z "$user_exists" ]]; then
