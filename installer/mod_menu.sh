@@ -180,7 +180,8 @@ USEREOF
                 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
                 echo "1) Ver túneles activos"
                 echo "2) Agregar nuevo túnel"
-                echo "3) Reiniciar Stunnel"
+                echo "3) Desactivar / eliminar un túnel"
+                echo "4) Reiniciar Stunnel"
                 echo "0) Volver"
                 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
                 read -p "Opción: " tunnel_opt
@@ -190,15 +191,21 @@ USEREOF
                         clear
                         echo "TÚNELES SSL ACTIVOS:"
                         echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-                        grep -E '\[|accept|connect' /etc/stunnel/stunnel.conf
+                        grep -E '^\[|^accept|^connect' /etc/stunnel/stunnel.conf 2>/dev/null
                         echo ""
                         echo "Puertos escuchando:"
-                        ss -tlnp | grep stunnel
+                        ss -tlnp 2>/dev/null | grep stunnel || echo "  (ninguno)"
+                        echo ""
+                        if pgrep -x stunnel4 >/dev/null 2>&1; then
+                            echo -e "${GREEN}✓ Stunnel proceso activo (PID: $(pgrep -x stunnel4 | head -1))${NC}"
+                        else
+                            echo -e "${RED}✗ Stunnel proceso NO activo${NC}"
+                        fi
                         read -p "ENTER..."
                         ;;
                     2)
                         clear
-                        echo "AGREGAR NUEVO TÚNEL"
+                        echo "AGREGAR NUEVO TÚNEL SSL"
                         echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
                         read -p "Nombre del túnel (ej: tunnel-8443): " tunnel_name
                         read -p "Puerto de escucha (ej: 8443): " tunnel_port
@@ -207,23 +214,27 @@ USEREOF
                         echo "  143 - Dropbear 2016 (recomendado)"
                         read -p "Puerto destino [143]: " tunnel_dest
                         tunnel_dest=${tunnel_dest:-143}
-
-                        cat >> /etc/stunnel/stunnel.conf <<TUNNELEOF
-
-[$tunnel_name]
-client = no
-accept = 0.0.0.0:$tunnel_port
-connect = 127.0.0.1:$tunnel_dest
-cert = /etc/stunnel/stunnel.pem
-verify = 0
-TUNNELEOF
-
-                        systemctl restart stunnel4
-                        echo "✓ Túnel $tunnel_name en puerto $tunnel_port → $tunnel_dest"
+                        ssl_add_port "$tunnel_name" "$tunnel_port" "$tunnel_dest"
                         read -p "ENTER..."
                         ;;
                     3)
-                        systemctl restart stunnel4 && echo "✓ Stunnel reiniciado" || echo "✗ Error"
+                        clear
+                        echo "DESACTIVAR TÚNEL SSL"
+                        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                        echo "Túneles configurados:"
+                        grep -E '^\[|^accept' /etc/stunnel/stunnel.conf 2>/dev/null | \
+                            awk '/^\[/{n=$0} /^accept/{print n" → ",$0}'
+                        echo ""
+                        read -p "Puerto a desactivar (ej: 443): " rm_port
+                        if [ -n "$rm_port" ]; then
+                            ssl_remove_port "$rm_port"
+                        else
+                            echo "Cancelado."
+                        fi
+                        read -p "ENTER..."
+                        ;;
+                    4)
+                        stunnel_restart
                         read -p "ENTER..."
                         ;;
                 esac
@@ -323,7 +334,7 @@ TUNNELEOF
                     1) restart_proxies; echo ""; read -p "ENTER..." ;;
                     2) systemctl restart ssh          && echo "✓ OpenSSH reiniciado"   || echo "✗ Error"; read -p "ENTER..." ;;
                     3) systemctl restart dropbear-legacy && echo "✓ Dropbear reiniciado" || echo "✗ Error"; read -p "ENTER..." ;;
-                    4) systemctl restart stunnel4     && echo "✓ Stunnel reiniciado"   || echo "✗ Error"; read -p "ENTER..." ;;
+                    4) stunnel_restart; read -p "ENTER..." ;;
                     5) systemctl restart badvpn-udpgw && echo "✓ BadVPN reiniciado"   || echo "✗ Error"; read -p "ENTER..." ;;
                     6) restart_all_services; echo ""; read -p "ENTER..." ;;
                 esac
@@ -342,30 +353,48 @@ TUNNELEOF
                     echo ""
                     echo "Desinstalando MSY VPN..."
 
-                    # Detener y deshabilitar servicios
+                    # PASO 1: Liberar TODOS los puertos ANTES de detener servicios
+                    # (evita que queden ocupados si systemctl stop falla)
+                    echo "Liberando puertos..."
+                    kill_all_ports
+
+                    # PASO 2: Detener y deshabilitar servicios
                     echo "Deteniendo servicios..."
                     systemctl stop dropbear-legacy    2>/dev/null
                     systemctl stop badvpn-udpgw       2>/dev/null
                     systemctl stop stunnel4            2>/dev/null
                     systemctl stop restore-proxies     2>/dev/null
+                    systemctl stop proxy-watchdog      2>/dev/null
                     systemctl stop hysteria            2>/dev/null
 
                     systemctl disable dropbear-legacy  2>/dev/null
                     systemctl disable badvpn-udpgw     2>/dev/null
-                    systemctl disable restore-proxies   2>/dev/null
-                    systemctl disable hysteria          2>/dev/null
+                    systemctl disable restore-proxies  2>/dev/null
+                    systemctl disable proxy-watchdog   2>/dev/null
+                    systemctl disable hysteria         2>/dev/null
 
-                    # Matar procesos
+                    # PASO 3: Matar procesos residuales
                     echo "Eliminando procesos..."
-                    pkill -9 -f "proxy.py" 2>/dev/null
-                    pkill -9 -f "badvpn-udpgw" 2>/dev/null
-                    screen -ls 2>/dev/null | grep "proxy-" | awk '{print $1}' | xargs -I {} screen -X -S {} quit 2>/dev/null
+                    pkill -9 -x stunnel4               2>/dev/null
+                    pkill -9 -f "stunnel4 /etc"        2>/dev/null
+                    pkill -9 -f "proxy.py"             2>/dev/null
+                    pkill -9 -f "badvpn-udpgw"         2>/dev/null
+                    pkill -9 -f "watchdog.sh"          2>/dev/null
+                    screen -ls 2>/dev/null | grep "proxy-" | awk '{print $1}' | \
+                        xargs -I {} screen -X -S {} quit 2>/dev/null
+
+                    # PASO 4: Segunda liberación de puertos (por si quedó algo)
+                    for p in 22 80 143 443 444 777 7300 8080 8880 8888; do
+                        fuser -k "${p}/tcp" 2>/dev/null
+                        fuser -k "${p}/udp" 2>/dev/null
+                    done
 
                     # Eliminar archivos de servicios systemd
                     echo "Eliminando archivos del sistema..."
                     rm -f /etc/systemd/system/dropbear-legacy.service
                     rm -f /etc/systemd/system/badvpn-udpgw.service
                     rm -f /etc/systemd/system/restore-proxies.service
+                    rm -f /etc/systemd/system/proxy-watchdog.service
                     systemctl daemon-reload
 
                     # Eliminar binarios compilados
@@ -383,10 +412,7 @@ TUNNELEOF
                     rm -f /etc/stunnel/stunnel.pem
                     rm -f /etc/stunnel/stunnel.key
                     rm -f /etc/stunnel/stunnel.crt
-
-                    # Restaurar stunnel4 a estado deshabilitado
                     echo "ENABLED=0" > /etc/default/stunnel4
-                    systemctl restart stunnel4 2>/dev/null || true
 
                     # Eliminar scripts del menú
                     rm -f /root/vpn-installer.sh
@@ -401,7 +427,7 @@ TUNNELEOF
 
                     # Eliminar fuentes descargadas
                     rm -rf /usr/src/dropbear-2016.74 2>/dev/null
-                    rm -f /usr/src/dropbear-2016.74.tar.bz2 2>/dev/null
+                    rm -f  /usr/src/dropbear-2016.74.tar.bz2 2>/dev/null
                     rm -rf /usr/src/badvpn 2>/dev/null
 
                     # Eliminar scripts temporales hysteria
@@ -418,12 +444,12 @@ TUNNELEOF
                         echo "✓ Swap eliminado"
                     fi
 
-                    # Restaurar SSH a configuración básica (mantener activo)
                     echo ""
                     echo -e "${GREEN}✓ Desinstalación completada${NC}"
                     echo ""
-                    echo "  Servicios eliminados: Dropbear 2016, BadVPN, Stunnel, Proxies"
+                    echo "  Servicios eliminados: Dropbear 2016, BadVPN, Stunnel, Proxies, Watchdog"
                     echo "  OpenSSH se mantiene activo en puerto 22"
+                    echo "  Todos los puertos han sido liberados"
                     echo ""
                     echo "  La VPS queda limpia. Puedes instalar otra versión."
                     exit 0
