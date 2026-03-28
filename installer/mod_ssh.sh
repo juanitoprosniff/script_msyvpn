@@ -1,14 +1,21 @@
 #!/bin/bash
-# mod_ssh.sh - MSY VPN v104+ (FIXED)
+# mod_ssh.sh - MSY VPN v104+ (FIXED v2)
 # SSH: OpenSSH :22 + Dropbear legacy :143
 #
-# CORRECCIONES v104-fix:
-#   - CFLAGS completos para GCC 9/11/13/14 (Ubuntu 18/20/22/24/25)
-#   - Parche de sources para Dropbear 2016 en GCC 12+
-#   - Manejo correcto de "Illegal packet size" (tráfico HTTP llegando a SSH)
-#   - Dependencias de compilación verificadas antes de intentar
-#   - Fallback robusto con reintento automático
-#   - Soporte Ubuntu 18.04 (Bionic) explícito
+# FIXES v2:
+#   - BUG PRINCIPAL: make -j$(nproc) causa race condition en libtomcrypt/libtommath
+#     dentro del source de Dropbear 2016. Con compilación paralela, los workers
+#     arrancan a compilar los .c antes de que los headers de la sublib estén listos
+#     → "tomcrypt.h: No such file or directory"
+#     SOLUCIÓN: compilar sublibs primero en -j1, luego el resto en paralelo.
+#
+#   - "Illegal packet size! (1231976033)" = 0x496E7421 = bytes "Int!"
+#     Son los primeros bytes de una petición HTTP llegando al puerto SSH.
+#     NO es bug de Dropbear/OpenSSH — es tráfico no-SSH en el puerto 143.
+#     SOLUCIÓN: wrapper socat que detecta protocolo antes de pasar al daemon.
+#
+#   - CFLAGS correctos para GCC 7→14 (Ubuntu 18/20/22/24/25)
+#   - Fallback triple: 2016 → 2019 → OpenSSH
 
 # ============================================================
 # DETECCIÓN DE ENTORNO
@@ -26,30 +33,16 @@ echo " OS: Ubuntu $OS_VER | Arch: $ARCH | GCC: $GCC_VER"
 echo "=========================================="
 
 # ============================================================
-# DEPENDENCIAS DE COMPILACIÓN
-# Instalar antes de cualquier compilación para evitar errores
+# DEPENDENCIAS
 # ============================================================
 echo ""
-echo "Verificando dependencias de compilación..."
-
-PKGS_NEEDED="gcc make wget libc6-dev"
-
-# En Ubuntu 18+ el paquete de headers varía
-if apt-cache show linux-headers-$(uname -r) >/dev/null 2>&1; then
-    PKGS_NEEDED="$PKGS_NEEDED linux-headers-$(uname -r)"
-fi
-
-# libssl-dev: nombre puede variar en Ubuntu 18 vs 20+
-if apt-cache show libssl-dev >/dev/null 2>&1; then
-    PKGS_NEEDED="$PKGS_NEEDED libssl-dev"
-fi
-
-apt-get update -qq 2>/dev/null
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq $PKGS_NEEDED 2>/dev/null
+echo "Verificando dependencias..."
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+    gcc make wget libc6-dev libssl-dev socat 2>/dev/null
 echo "✓ Dependencias OK"
 
 # ============================================================
-# OPENSSH (PUERTO 22) — forzar solo IPv4
+# OPENSSH (PUERTO 22)
 # ============================================================
 echo ""
 echo "Configurando OpenSSH en puerto 22..."
@@ -92,79 +85,45 @@ systemctl is-active --quiet ssh \
 
 # ============================================================
 # CFLAGS POR VERSIÓN DE GCC
-#
-# El error "Illegal packet size! (1231976033)" NO es un bug de
-# compilación — es tráfico HTTP/no-SSH llegando al puerto 143.
-# Dropbear lo registra pero no crashea; el cliente sí desconecta.
-# Solución real: el proxy HTTP debe hablar SSH correctamente.
-#
-# Los CFLAGS aquí resuelven los errores de COMPILACIÓN:
-#   GCC 12+: implicit-function-declaration, implicit-int
-#   GCC 14+: incompatible-pointer-types (más estricto)
 # ============================================================
 if   [ "$GCC_VER" -ge 14 ] 2>/dev/null; then
-    COMPAT_CFLAGS="-w -Wno-error -fcommon -Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=int-conversion -Wno-error=incompatible-pointer-types -Wno-error=discarded-qualifiers -std=gnu11"
-    echo "  GCC $GCC_VER detectado — CFLAGS máximos (GCC 14)"
+    COMPAT_CFLAGS="-w -fcommon -std=gnu11"
+    echo "  GCC $GCC_VER — CFLAGS máximos (GCC 14)"
 elif [ "$GCC_VER" -ge 12 ] 2>/dev/null; then
-    COMPAT_CFLAGS="-Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=int-conversion -Wno-error=incompatible-pointer-types -fcommon"
-    echo "  GCC $GCC_VER detectado — CFLAGS GCC 12/13"
+    COMPAT_CFLAGS="-w -fcommon -Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=int-conversion -Wno-error=incompatible-pointer-types"
+    echo "  GCC $GCC_VER — CFLAGS GCC 12/13"
 else
-    COMPAT_CFLAGS="-fcommon"
-    echo "  GCC $GCC_VER detectado — CFLAGS estándar"
+    COMPAT_CFLAGS="-w -fcommon"
+    echo "  GCC $GCC_VER — CFLAGS estándar"
 fi
 
 # ============================================================
-# FUNCIÓN: parchear sources de Dropbear 2016 para GCC 12+
-# Dropbear 2016 tiene funciones implícitas que GCC 12+ rechaza
-# aun con -Wno-error: algunos problemas son de sintaxis real
-# ============================================================
-parchear_dropbear_2016() {
-    local SRCDIR=$1
-    echo "  Aplicando parches de compatibilidad a Dropbear 2016..."
-
-    # Parche 1: atomics.h — usa __sync_* que en algunos GCC necesita include
-    if [ -f "$SRCDIR/atomics.h" ]; then
-        grep -q "#include <stdint.h>" "$SRCDIR/atomics.h" || \
-            sed -i '1s/^/#include <stdint.h>\n/' "$SRCDIR/atomics.h"
-    fi
-
-    # Parche 2: chansession.c — declaraciones implícitas de getutent/pututline
-    if [ -f "$SRCDIR/chansession.c" ]; then
-        grep -q "#include <utmp.h>" "$SRCDIR/chansession.c" || \
-            sed -i '/#include "includes.h"/a #include <utmp.h>' "$SRCDIR/chansession.c"
-    fi
-
-    # Parche 3: loginrec.c — declaraciones implícitas
-    if [ -f "$SRCDIR/loginrec.c" ]; then
-        grep -q "#include <utmpx.h>" "$SRCDIR/loginrec.c" || \
-            sed -i '/#include "includes.h"/a #include <utmpx.h>' "$SRCDIR/loginrec.c"
-    fi
-
-    # Parche 4: fuzz targets que GCC 14 rechaza (solo si existen)
-    for fuzz_f in fuzz-*.c; do
-        [ -f "$SRCDIR/$fuzz_f" ] && rm -f "$SRCDIR/$fuzz_f"
-    done
-
-    echo "  ✓ Parches aplicados"
-}
-
-# ============================================================
-# FUNCIÓN GENÉRICA: compilar una versión de Dropbear
-# Uso: compilar_dropbear <version> <url> <prefix> [parchear=0|1]
+# FUNCIÓN: compilar Dropbear
+#
+# FIX CRÍTICO — race condition en libtomcrypt/libtommath:
+#   Con -j$(nproc), make lanza todos los compiladores en paralelo.
+#   libtomcrypt genera headers internos (tomcrypt.h) durante su
+#   propio proceso de build. Si otro worker ya empezó a compilar
+#   los .c que necesitan ese header → "No such file or directory".
+#
+#   SOLUCIÓN en 3 pasos:
+#     1. make -j1 libtommath   → sin paralelismo (lib pequeña, rápida)
+#     2. make -j1 libtomcrypt  → sin paralelismo, necesita paso 1
+#     3. make -j$(nproc) resto → ahora sí en paralelo, las libs ya están
 # ============================================================
 compilar_dropbear() {
     local VER=$1
     local URL=$2
     local PREFIX=$3
-    local PARCHEAR=${4:-0}
     local TARBALL="dropbear-${VER}.tar.bz2"
     local SRCDIR="/usr/src/dropbear-${VER}"
     local SRVRBIN="${PREFIX}/sbin/dropbear"
-    local KEYBIN="${PREFIX}/bin/dropbearkey"
+    local LOGFILE="/tmp/dropbear_build_${VER}.log"
 
     echo ""
     echo "  ── Compilando Dropbear $VER ──"
     echo "  Prefix: $PREFIX"
+    > "$LOGFILE"
 
     cd /usr/src
 
@@ -172,17 +131,10 @@ compilar_dropbear() {
     if [ ! -f "$TARBALL" ] || [ ! -s "$TARBALL" ]; then
         echo "  Descargando $TARBALL..."
         wget -q --timeout=60 -O "$TARBALL" "$URL" 2>/dev/null
-        # Mirror alternativo
         if [ ! -s "$TARBALL" ]; then
-            echo "  Mirror alternativo..."
+            echo "  Mirror 2..."
             wget -q --timeout=60 -O "$TARBALL" \
                 "https://dropbear.nl/mirror/releases/$TARBALL" 2>/dev/null
-        fi
-        # Segundo mirror
-        if [ ! -s "$TARBALL" ]; then
-            echo "  Segundo mirror..."
-            wget -q --timeout=60 -O "$TARBALL" \
-                "https://github.com/mkj/dropbear/archive/refs/tags/DROPBEAR_${VER//./_}.tar.gz" 2>/dev/null
         fi
         if [ ! -s "$TARBALL" ]; then
             echo "  ✗ No se pudo descargar Dropbear $VER"
@@ -190,7 +142,7 @@ compilar_dropbear() {
         fi
     fi
 
-    # ── Extraer ──
+    # ── Extraer (siempre limpio para evitar builds sucios) ──
     rm -rf "$SRCDIR" 2>/dev/null
     tar xjf "$TARBALL" -C /usr/src 2>/dev/null
     if [ ! -d "$SRCDIR" ]; then
@@ -200,16 +152,10 @@ compilar_dropbear() {
 
     cd "$SRCDIR"
 
-    # ── Parchear si se pide (para 2016 en GCC 12+) ──
-    [ "$PARCHEAR" = "1" ] && parchear_dropbear_2016 "$SRCDIR"
-
     # ── Personalizar identificador SSH ──
     for f in sysoptions.h default_options.h options.h; do
-        if [ -f "$f" ]; then
-            if grep -q "LOCAL_IDENT" "$f"; then
-                sed -i 's|#define LOCAL_IDENT.*|#define LOCAL_IDENT "SSH-2.0-ByJuanitoProSniff"|' "$f"
-            fi
-        fi
+        [ -f "$f" ] && grep -q "LOCAL_IDENT" "$f" && \
+            sed -i 's|#define LOCAL_IDENT.*|#define LOCAL_IDENT "SSH-2.0-ByJuanitoProSniff"|' "$f"
     done
     if grep -rq "IDENT_VERSION_PART" . 2>/dev/null; then
         find . -name "*.h" | xargs grep -l "IDENT_VERSION_PART" 2>/dev/null | while read hf; do
@@ -226,18 +172,37 @@ compilar_dropbear() {
         --disable-lastlog \
         >/dev/null 2>&1
 
-    # ── Compilar ──
-    echo "  Compilando... (2-5 min según CPU)"
+    # ── PASO 1: libtommath solo, sin paralelismo ──
+    echo "  [1/3] libtommath..."
+    if [ -d libtommath ]; then
+        if ! make -C libtommath -j1 CFLAGS="$COMPAT_CFLAGS" >> "$LOGFILE" 2>&1; then
+            echo "  ✗ libtommath falló — log: $LOGFILE"
+            tail -5 "$LOGFILE"
+            unset CFLAGS; cd /root; return 1
+        fi
+        echo "  ✓ libtommath OK"
+    fi
+
+    # ── PASO 2: libtomcrypt solo, sin paralelismo ──
+    echo "  [2/3] libtomcrypt..."
+    if [ -d libtomcrypt ]; then
+        if ! make -C libtomcrypt -j1 CFLAGS="$COMPAT_CFLAGS" >> "$LOGFILE" 2>&1; then
+            echo "  ✗ libtomcrypt falló — log: $LOGFILE"
+            tail -5 "$LOGFILE"
+            unset CFLAGS; cd /root; return 1
+        fi
+        echo "  ✓ libtomcrypt OK"
+    fi
+
+    # ── PASO 3: build principal, ahora en paralelo ──
+    echo "  [3/3] Compilando dropbear... (1-3 min)"
     if ! make -j$(nproc) \
             PROGRAMS="dropbear dropbearkey" \
             CFLAGS="$COMPAT_CFLAGS" \
-            2>/tmp/dropbear_build_${VER}.log; then
-
+            >> "$LOGFILE" 2>&1; then
         echo "  ✗ make falló — últimas líneas:"
-        tail -10 /tmp/dropbear_build_${VER}.log
-        unset CFLAGS
-        cd /root
-        return 1
+        tail -10 "$LOGFILE"
+        unset CFLAGS; cd /root; return 1
     fi
 
     make install PROGRAMS="dropbear dropbearkey" >/dev/null 2>&1
@@ -245,79 +210,46 @@ compilar_dropbear() {
 
     if [ ! -f "$SRVRBIN" ]; then
         echo "  ✗ Binario no encontrado: $SRVRBIN"
-        cd /root
-        return 1
+        cd /root; return 1
     fi
 
-    local compiled_ver
-    compiled_ver=$("$SRVRBIN" -V 2>&1 | head -1)
-    echo "  ✓ Dropbear $VER compilado: $compiled_ver"
+    echo "  ✓ Dropbear $VER compilado OK"
     cd /root
     return 0
 }
 
 # ============================================================
-# COMPILAR DROPBEAR 2016.74
-# Parchear si GCC >= 12 para evitar errores de sintaxis implícita
+# COMPILAR AMBAS VERSIONES
 # ============================================================
 echo ""
 echo "══════════════════════════════════════════"
 echo " Compilando Dropbear 2016.74..."
 echo "══════════════════════════════════════════"
-
-PARCHEAR_2016=0
-[ "$GCC_VER" -ge 12 ] 2>/dev/null && PARCHEAR_2016=1
-
 compilar_dropbear "2016.74" \
     "https://matt.ucc.asn.au/dropbear/releases/dropbear-2016.74.tar.bz2" \
-    "/opt/dropbear-2016" \
-    "$PARCHEAR_2016"
+    "/opt/dropbear-2016"
+DB2016_OK=0; [ -f /opt/dropbear-2016/sbin/dropbear ] && DB2016_OK=1
 
-DB2016_OK=0
-[ -f /opt/dropbear-2016/sbin/dropbear ] && DB2016_OK=1
-
-# Si falló con parche, intentar sin parche (por si el entorno es más permisivo)
-if [ "$DB2016_OK" = "0" ] && [ "$PARCHEAR_2016" = "1" ]; then
-    echo "  Reintentando Dropbear 2016 sin parche con -w (suprimir todos los warnings)..."
-    COMPAT_CFLAGS_ORIG="$COMPAT_CFLAGS"
-    COMPAT_CFLAGS="-w -fcommon -std=gnu11"
-    compilar_dropbear "2016.74" \
-        "https://matt.ucc.asn.au/dropbear/releases/dropbear-2016.74.tar.bz2" \
-        "/opt/dropbear-2016" \
-        "0"
-    COMPAT_CFLAGS="$COMPAT_CFLAGS_ORIG"
-    [ -f /opt/dropbear-2016/sbin/dropbear ] && DB2016_OK=1
-fi
-
-# ============================================================
-# COMPILAR DROPBEAR 2019.78
-# ============================================================
 echo ""
 echo "══════════════════════════════════════════"
 echo " Compilando Dropbear 2019.78..."
 echo "══════════════════════════════════════════"
 compilar_dropbear "2019.78" \
     "https://matt.ucc.asn.au/dropbear/releases/dropbear-2019.78.tar.bz2" \
-    "/opt/dropbear-2019" \
-    "0"
-
-DB2019_OK=0
-[ -f /opt/dropbear-2019/sbin/dropbear ] && DB2019_OK=1
+    "/opt/dropbear-2019"
+DB2019_OK=0; [ -f /opt/dropbear-2019/sbin/dropbear ] && DB2019_OK=1
 
 echo ""
 echo "══════════════════════════════════════════"
 echo " Resultado compilaciones:"
-[ "$DB2016_OK" = "1" ] && echo "  ✓ Dropbear 2016.74 disponible" || echo "  ✗ Dropbear 2016.74 falló"
-[ "$DB2019_OK" = "1" ] && echo "  ✓ Dropbear 2019.78 disponible" || echo "  ✗ Dropbear 2019.78 falló"
+[ "$DB2016_OK" = "1" ] && echo "  ✓ Dropbear 2016.74" || echo "  ✗ Dropbear 2016.74 falló"
+[ "$DB2019_OK" = "1" ] && echo "  ✓ Dropbear 2019.78" || echo "  ✗ Dropbear 2019.78 falló"
 echo "══════════════════════════════════════════"
 
 # ============================================================
 # SELECCIONAR VERSIÓN ACTIVA
-# Prioridad: 2016 → 2019 → OpenSSH fallback
 # ============================================================
-ACTIVE_DB_BIN=""
-ACTIVE_DB_VER=""
-ACTIVE_DB_KEYBIN=""
+ACTIVE_DB_BIN=""; ACTIVE_DB_VER=""; ACTIVE_DB_KEYBIN=""
 
 if [ "$DB2016_OK" = "1" ]; then
     ACTIVE_DB_BIN="/opt/dropbear-2016/sbin/dropbear"
@@ -330,10 +262,9 @@ elif [ "$DB2019_OK" = "1" ]; then
 fi
 
 # ============================================================
-# GENERAR LLAVES SSH PARA DROPBEAR
+# GENERAR LLAVES
 # ============================================================
 mkdir -p /etc/dropbear-legacy
-
 cat > /etc/dropbear-legacy/banner.txt <<'BANEOF'
 t.me/FREEINTERNETVPNMSY
 BANEOF
@@ -349,19 +280,81 @@ if [ -n "$ACTIVE_DB_KEYBIN" ]; then
 fi
 
 # ============================================================
-# FUNCIÓN: generar servicio systemd
+# WRAPPER ANTI "Illegal packet size"
 #
-# SOBRE "Illegal packet size" (1231976033 = 0x496E7421 = "Int!"):
-#   Este error aparece cuando tráfico HTTP llega al puerto SSH.
-#   Dropbear lo loguea pero NO falla — el bug real está en los
-#   proxies HTTP que no reenvían la sesión SSH correctamente.
-#   Aquí usamos -s para silenciar esos logs y evitar confusión.
-#   La solución completa está en mod_proxies.sh asegurando que
-#   los proxies hagan CONNECT TCP (tunnel), no HTTP forward.
+# El error 1231976033 = 0x496E7421 = ASCII "Int!" son los primeros
+# 4 bytes de tráfico HTTP llegando al puerto SSH. Dropbear/OpenSSH
+# lo reportan y cierran la conexión. Solución: un wrapper en el
+# puerto público 143 que detecta si viene SSH o HTTP:
+#
+#   Puerto público  :143  ← socat wrapper (detecta protocolo)
+#   Puerto interno  :1143 ← Dropbear real (solo recibe SSH limpio)
+#
+# El wrapper lee la primera línea del cliente:
+#   "SSH-*"     → es conexión SSH real  → reenviar a :1143
+#   "CONNECT *" → es proxy HTTP CONNECT → responder 200 y tunelizar
+#   otro        → tráfico basura        → cerrar limpiamente
+# ============================================================
+instalar_wrapper_143() {
+    echo ""
+    echo "Instalando wrapper de protocolo en :143..."
+
+    cat > /usr/local/bin/msy-ssh-wrapper.sh <<'WRAPPER'
+#!/bin/bash
+# Wrapper MSY VPN - detección de protocolo en puerto 143
+# Dropbear escucha en 127.0.0.1:1143 (solo recibe SSH limpio)
+
+read -t 10 -r PRIMERA_LINEA
+
+if [[ "$PRIMERA_LINEA" == SSH-* ]]; then
+    # Conexión SSH legítima: pasar a Dropbear con la línea que ya leímos
+    { printf '%s\r\n' "$PRIMERA_LINEA"; cat; } | socat - TCP:127.0.0.1:1143
+elif [[ "$PRIMERA_LINEA" == CONNECT\ * ]]; then
+    # Proxy HTTP CONNECT: responder 200 y tunelizar
+    printf 'HTTP/1.0 200 Connection established\r\n\r\n'
+    socat - TCP:127.0.0.1:1143
+elif [[ -z "$PRIMERA_LINEA" ]]; then
+    # Sin datos (timeout o conexión vacía): pasar directo
+    socat - TCP:127.0.0.1:1143
+else
+    # Tráfico no-SSH (GET, POST, escáneres, etc): cerrar limpiamente
+    printf 'HTTP/1.0 400 Bad Request\r\nContent-Length: 0\r\n\r\n'
+fi
+WRAPPER
+    chmod +x /usr/local/bin/msy-ssh-wrapper.sh
+
+    cat > /etc/systemd/system/msy-ssh-wrapper.service <<'WSVC'
+[Unit]
+Description=MSY SSH Protocol Wrapper :143
+After=network.target dropbear-legacy.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/socat \
+    TCP-LISTEN:143,reuseaddr,fork,backlog=128 \
+    EXEC:/usr/local/bin/msy-ssh-wrapper.sh
+Restart=always
+RestartSec=3
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
+WSVC
+
+    systemctl daemon-reload
+    systemctl enable msy-ssh-wrapper >/dev/null 2>&1
+    echo "  ✓ Wrapper instalado"
+}
+
+# ============================================================
+# FUNCIÓN: generar servicio systemd para Dropbear
+# Puerto por defecto: 1143 (interno, el wrapper expone :143)
 # ============================================================
 generar_servicio_dropbear() {
     local BIN=$1
     local VER=$2
+    local PUERTO=${3:-1143}
+    local BIND=${4:-127.0.0.1}   # interno=127.0.0.1, directo=0.0.0.0
 
     local KEY_FLAGS=""
     [ -f /etc/dropbear-legacy/dropbear_rsa_host_key ]   && KEY_FLAGS="$KEY_FLAGS -r /etc/dropbear-legacy/dropbear_rsa_host_key"
@@ -369,14 +362,14 @@ generar_servicio_dropbear() {
 
     cat > /etc/systemd/system/dropbear-legacy.service <<DBSVC
 [Unit]
-Description=Dropbear SSH $VER - Puerto 143 (MSY VPN)
+Description=Dropbear SSH $VER - Puerto $PUERTO (MSY VPN)
 After=network.target
 Wants=network.target
 
 [Service]
 Type=simple
 ExecStart=${BIN} -F -E \\
-    -p 0.0.0.0:143 \\
+    -p ${BIND}:${PUERTO} \\
     ${KEY_FLAGS} \\
     -b /etc/dropbear-legacy/banner.txt \\
     -K 120 -I 600
@@ -396,80 +389,87 @@ DBSVC
 }
 
 # ============================================================
-# ARRANCAR DROPBEAR ACTIVO
+# ARRANCAR DROPBEAR + WRAPPER
 # ============================================================
+_liberar_puertos() {
+    systemctl stop msy-ssh-wrapper  2>/dev/null
+    systemctl stop dropbear-legacy  2>/dev/null
+    pkill -9 -f "dropbear.*143"     2>/dev/null
+    pkill -9 -f "socat.*143"        2>/dev/null
+    fuser -k 143/tcp  2>/dev/null
+    fuser -k 1143/tcp 2>/dev/null
+    sleep 1
+}
+
 if [ -n "$ACTIVE_DB_BIN" ]; then
     echo ""
-    echo "Activando Dropbear $ACTIVE_DB_VER en :143..."
+    echo "Activando Dropbear $ACTIVE_DB_VER + wrapper en :143..."
+    _liberar_puertos
 
-    # Liberar puerto 143 si está ocupado
-    systemctl stop dropbear-legacy 2>/dev/null
-    pkill -9 -f "dropbear.*143" 2>/dev/null
-    fuser -k 143/tcp 2>/dev/null
+    # Dropbear en puerto interno 1143 (solo loopback)
+    generar_servicio_dropbear "$ACTIVE_DB_BIN" "$ACTIVE_DB_VER" "1143" "127.0.0.1"
+    systemctl restart dropbear-legacy
     sleep 1
 
-    generar_servicio_dropbear "$ACTIVE_DB_BIN" "$ACTIVE_DB_VER"
-    systemctl restart dropbear-legacy
-    sleep 2
-
     if systemctl is-active --quiet dropbear-legacy; then
-        echo "✓ Dropbear $ACTIVE_DB_VER activo en 0.0.0.0:143"
-    else
-        echo "⚠ Dropbear no inició con systemd — intentando proceso directo..."
+        echo "✓ Dropbear $ACTIVE_DB_VER activo en 127.0.0.1:1143"
 
-        # Intento directo para ver el error real
-        DIRECT_ERR=$("$ACTIVE_DB_BIN" -F -E \
-            -p 0.0.0.0:143 \
-            -b /etc/dropbear-legacy/banner.txt \
-            -K 120 -I 600 2>&1 &
-            sleep 3
-            kill $! 2>/dev/null)
+        # Wrapper en :143
+        instalar_wrapper_143
+        systemctl restart msy-ssh-wrapper
+        sleep 1
 
-        if ss -tlnp 2>/dev/null | grep -q ":143 " || \
-           netstat -tlnp 2>/dev/null | grep -q ":143 "; then
-            echo "✓ Puerto 143 activo (proceso directo)"
+        if systemctl is-active --quiet msy-ssh-wrapper; then
+            echo "✓ Wrapper activo en 0.0.0.0:143"
+            echo "  → cliente:143 → wrapper → Dropbear:1143 (sin Illegal packet size)"
         else
-            echo "  Error al iniciar directamente: $DIRECT_ERR"
+            # socat no disponible o fallo: Dropbear directo en :143
+            echo "⚠ Wrapper falló (socat?). Dropbear directo en :143..."
+            _liberar_puertos
+            generar_servicio_dropbear "$ACTIVE_DB_BIN" "$ACTIVE_DB_VER" "143" "0.0.0.0"
+            systemctl restart dropbear-legacy
+            sleep 2
+            systemctl is-active --quiet dropbear-legacy \
+                && echo "✓ Dropbear $ACTIVE_DB_VER activo en 0.0.0.0:143 (directo)" \
+                || echo "✗ Dropbear no inició"
+        fi
 
-            # Intentar con la otra versión si está disponible
-            if [ "$ACTIVE_DB_VER" = "2016" ] && [ "$DB2019_OK" = "1" ]; then
-                echo "  Intentando Dropbear 2019 como alternativa..."
-                ACTIVE_DB_BIN="/opt/dropbear-2019/sbin/dropbear"
-                ACTIVE_DB_VER="2019"
-                generar_servicio_dropbear "$ACTIVE_DB_BIN" "$ACTIVE_DB_VER"
-                systemctl restart dropbear-legacy
-                sleep 2
-                systemctl is-active --quiet dropbear-legacy \
-                    && echo "✓ Dropbear 2019 activo en :143" \
-                    || echo "  ✗ Dropbear 2019 también falló"
-            fi
+    else
+        echo "⚠ Dropbear $ACTIVE_DB_VER no inició:"
+        journalctl -u dropbear-legacy --no-pager -n 8 2>/dev/null
 
-            # Fallback final: OpenSSH en :143
-            if ! ss -tlnp 2>/dev/null | grep -q ":143 " && \
-               ! netstat -tlnp 2>/dev/null | grep -q ":143 "; then
-                echo "⚠ Usando OpenSSH como fallback en :143"
-                if ! grep -q "^Port 143" /etc/ssh/sshd_config; then
-                    sed -i '/^Port 22/a Port 143' /etc/ssh/sshd_config
-                    systemctl restart ssh
-                fi
-                sleep 1
-                if ss -tlnp 2>/dev/null | grep -q ":143 " || \
-                   netstat -tlnp 2>/dev/null | grep -q ":143 "; then
-                    echo "✓ OpenSSH escuchando también en :143"
-                    ACTIVE_DB_VER="ssh_fallback"
-                else
-                    echo "✗ Puerto 143 no disponible"
-                    ACTIVE_DB_VER="ssh_fallback"
-                fi
+        # Probar versión alternativa
+        if [ "$ACTIVE_DB_VER" = "2016" ] && [ "$DB2019_OK" = "1" ]; then
+            echo "  Intentando Dropbear 2019..."
+            fuser -k 1143/tcp 2>/dev/null
+            generar_servicio_dropbear "/opt/dropbear-2019/sbin/dropbear" "2019" "1143" "127.0.0.1"
+            systemctl restart dropbear-legacy; sleep 2
+            if systemctl is-active --quiet dropbear-legacy; then
+                echo "✓ Dropbear 2019 activo"
+                ACTIVE_DB_VER="2019"; ACTIVE_DB_BIN="/opt/dropbear-2019/sbin/dropbear"
+                instalar_wrapper_143
+                systemctl restart msy-ssh-wrapper
             fi
         fi
+
+        # Fallback final: OpenSSH en :143
+        if ! systemctl is-active --quiet dropbear-legacy; then
+            echo "⚠ Fallback: OpenSSH en :143"
+            fuser -k 143/tcp 2>/dev/null
+            grep -q "^Port 143" /etc/ssh/sshd_config || \
+                sed -i '/^Port 22/a Port 143' /etc/ssh/sshd_config
+            systemctl restart ssh
+            ACTIVE_DB_VER="ssh_fallback"
+        fi
     fi
+
 else
-    echo "⚠ Ninguna versión de Dropbear compiló — usando OpenSSH en :143"
-    if ! grep -q "^Port 143" /etc/ssh/sshd_config; then
+    # Ningún Dropbear compiló
+    echo "⚠ Sin Dropbear — OpenSSH fallback en :143"
+    _liberar_puertos
+    grep -q "^Port 143" /etc/ssh/sshd_config || \
         sed -i '/^Port 22/a Port 143' /etc/ssh/sshd_config
-        systemctl restart ssh
-    fi
+    systemctl restart ssh
     ACTIVE_DB_VER="ssh_fallback"
 fi
 
@@ -490,7 +490,6 @@ USER_VPN="vpnuser"
 PASS_VPN="msy$(openssl rand -hex 4)"
 
 id "$USER_VPN" &>/dev/null && userdel -r "$USER_VPN" 2>/dev/null
-
 useradd -m -s /bin/bash "$USER_VPN"
 echo "$USER_VPN:$PASS_VPN" | chpasswd
 
