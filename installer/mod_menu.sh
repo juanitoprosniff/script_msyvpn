@@ -1,15 +1,8 @@
 #!/bin/bash
-# mod_menu.sh - MSY VPN v104+
-# Menú principal
-# Cambios vs versión anterior:
-#   - Sub-menú Dropbear (opción 7): cambiar entre 2016/2019/OpenSSH fallback
-#   - Panel principal: BadVPN UDP y Hysteria UDP con estados separados
-#   - curl -4 en toda IP pública → siempre muestra IPv4
+# mod_menu.sh - MSY VPN v105
+# Panel principal: muestra Dropbear 2016.74 (:143) y 2019.78 (:142)
+# Opción 7: Gestión Dropbear — cambiar versión por puerto, recompilar
 
-# ============================================================
-# HELPER: crear servicio systemd para una versión de Dropbear
-# Se define aquí para que el bloque MAINSCRIPT pueda usarla
-# ============================================================
 cat > /root/vpn-installer.sh << 'MAINSCRIPT'
 #!/bin/bash
 
@@ -20,123 +13,224 @@ fi
 
 source /root/ssh-vpn-functions.sh
 
-# ============================================================
-# HELPER interno: leer archivos de estado de Dropbear
-# ============================================================
-_db_active_ver()  { cat /etc/dropbear-legacy/active_version.txt 2>/dev/null || echo "?"; }
-_db_active_bin()  { cat /etc/dropbear-legacy/active_bin.txt     2>/dev/null || echo ""; }
-_db_has_2016()    { cat /etc/dropbear-legacy/has_2016.txt        2>/dev/null || echo "0"; }
-_db_has_2019()    { cat /etc/dropbear-legacy/has_2019.txt        2>/dev/null || echo "0"; }
+DB_DIR="/opt/dropbear-bins"
+DB_KEYS="/etc/dropbear-legacy"
 
 # ============================================================
-# HELPER: activar una versión de Dropbear
+# HELPERS: leer estado guardado por mod_ssh.sh
 # ============================================================
-activar_dropbear() {
-    local VER=$1   # "2016", "2019", o "ssh_fallback"
-    local BIN=""
-    local KEYBIN=""
+_db_active_ver()  { cat "$DB_KEYS/active_version.txt" 2>/dev/null || echo "?"; }
+_db_active_bin()  { cat "$DB_KEYS/active_bin.txt"     2>/dev/null || echo ""; }
+_db_has_2016()    { cat "$DB_KEYS/has_2016.txt"       2>/dev/null || echo "0"; }
+_db_has_2019()    { cat "$DB_KEYS/has_2019.txt"       2>/dev/null || echo "0"; }
 
-    case "$VER" in
-        2016)
-            BIN="/opt/dropbear-2016/sbin/dropbear"
-            KEYBIN="/opt/dropbear-2016/bin/dropbearkey"
-            ;;
-        2019)
-            BIN="/opt/dropbear-2019/sbin/dropbear"
-            KEYBIN="/opt/dropbear-2019/bin/dropbearkey"
-            ;;
-        ssh_fallback)
-            # Agregar puerto 143 a OpenSSH si no está
-            systemctl stop dropbear-legacy 2>/dev/null
-            fuser -k 143/tcp 2>/dev/null
-            sleep 1
-            if ! grep -q "^Port 143" /etc/ssh/sshd_config; then
-                sed -i '/^Port 22/a Port 143' /etc/ssh/sshd_config
-            fi
-            systemctl restart ssh
-            echo "ssh_fallback" > /etc/dropbear-legacy/active_version.txt
-            echo ""             > /etc/dropbear-legacy/active_bin.txt
-            ss -tlnp | grep -q ":143 " \
-                && echo "✓ OpenSSH activo en :143" \
-                || echo "✗ Falló activar OpenSSH en :143"
-            return
-            ;;
-        *)
-            echo "✗ Versión desconocida: $VER"
-            return 1
-            ;;
-    esac
+_db_port_status() {
+    # $1 = versión ("2016.74" o "2019.78"), $2 = puerto público
+    local SVC="dropbear-${1//./-}"
+    local WR="msy-wrap-${2}"
+    if systemctl is-active --quiet "$SVC" 2>/dev/null \
+       || systemctl is-active --quiet "$WR" 2>/dev/null \
+       || ss -tlnp 2>/dev/null | grep -q ":${2} "; then
+        echo -e "\033[1;32mON\033[0m"
+    else
+        echo -e "\033[1;31mOFF\033[0m"
+    fi
+}
 
-    if [ ! -f "$BIN" ]; then
-        echo "✗ Binario Dropbear $VER no encontrado: $BIN"
-        echo "  ¿Se compiló correctamente durante la instalación?"
+# ============================================================
+# FUNCIÓN: cambiar la versión de Dropbear en un puerto dado
+#
+# $1 = versión destino ("2016.74" / "2019.78" / "ssh_fallback")
+# $2 = puerto público (143 o 142)
+# $3 = puerto interno (1143 o 1142)
+# ============================================================
+_cambiar_dropbear_puerto() {
+    local VER="$1"
+    local PPUB="$2"
+    local PINT="$3"
+    local BIN="$DB_DIR/dropbear-${VER}"
+    local SVC="dropbear-${VER//./-}"
+    local WR_SVC="msy-wrap-${PPUB}"
+
+    # Detener cualquier cosa corriendo en ese puerto
+    # Buscar qué servicio ocupa el puerto ahora y detenerlo
+    for old_svc in dropbear-2016-74 dropbear-2019-78 msy-wrap-${PPUB}; do
+        systemctl stop "$old_svc" 2>/dev/null
+    done
+    pkill -9 -f "dropbear.*${PINT}" 2>/dev/null
+    pkill -9 -f "socat.*${PPUB}"    2>/dev/null
+    fuser -k "${PPUB}/tcp" 2>/dev/null
+    fuser -k "${PINT}/tcp" 2>/dev/null
+    sleep 1
+
+    if [ "$VER" = "ssh_fallback" ]; then
+        # Quitar Dropbear del puerto y poner OpenSSH
+        fuser -k "${PPUB}/tcp" 2>/dev/null
+        if ! grep -q "^Port ${PPUB}" /etc/ssh/sshd_config; then
+            sed -i "/^Port 22/a Port ${PPUB}" /etc/ssh/sshd_config
+        fi
+        systemctl restart ssh
+        sleep 1
+        ss -tlnp | grep -q ":${PPUB} " \
+            && echo "✓ OpenSSH fallback activo en :${PPUB}" \
+            || echo "✗ No se pudo activar OpenSSH en :${PPUB}"
+        [ "$PPUB" = "143" ] && echo "ssh_fallback" > "$DB_KEYS/active_version.txt"
+        return
+    fi
+
+    if [ ! -x "$BIN" ]; then
+        echo "✗ Binario $BIN no encontrado"
+        echo "  Usa la opción de Recompilar en el menú Dropbear"
         return 1
     fi
 
-    # Generar llaves si no existen (con el keybin de la versión elegida)
-    mkdir -p /etc/dropbear-legacy
-    [ ! -f /etc/dropbear-legacy/dropbear_rsa_host_key ] && \
-        "$KEYBIN" -t rsa -f /etc/dropbear-legacy/dropbear_rsa_host_key -s 2048 >/dev/null 2>&1
-    [ ! -f /etc/dropbear-legacy/dropbear_ecdsa_host_key ] && \
-        "$KEYBIN" -t ecdsa -f /etc/dropbear-legacy/dropbear_ecdsa_host_key >/dev/null 2>&1
-
-    # Construir flags de llaves
-    local KEY_FLAGS=""
-    [ -f /etc/dropbear-legacy/dropbear_rsa_host_key ]   && KEY_FLAGS="$KEY_FLAGS -r /etc/dropbear-legacy/dropbear_rsa_host_key"
-    [ -f /etc/dropbear-legacy/dropbear_ecdsa_host_key ] && KEY_FLAGS="$KEY_FLAGS -r /etc/dropbear-legacy/dropbear_ecdsa_host_key"
-
-    # Detener versión anterior y liberar puerto
-    systemctl stop dropbear-legacy 2>/dev/null
-    pkill -9 -f "dropbear.*143" 2>/dev/null
-    fuser -k 143/tcp 2>/dev/null
-    sleep 1
-
-    # Si antes usábamos OpenSSH en :143, quitarlo del sshd_config
-    if grep -q "^Port 143" /etc/ssh/sshd_config 2>/dev/null; then
-        sed -i '/^Port 143/d' /etc/ssh/sshd_config
+    # Si el puerto tenía OpenSSH, quitarlo de sshd_config
+    if grep -q "^Port ${PPUB}" /etc/ssh/sshd_config 2>/dev/null; then
+        sed -i "/^Port ${PPUB}/d" /etc/ssh/sshd_config
         systemctl restart ssh 2>/dev/null
     fi
 
-    # Escribir nuevo unit
-    cat > /etc/systemd/system/dropbear-legacy.service <<DBSVC
+    local KF=""
+    [ -f "$DB_KEYS/dropbear_rsa_host_key" ]   && KF="$KF -r $DB_KEYS/dropbear_rsa_host_key"
+    [ -f "$DB_KEYS/dropbear_ecdsa_host_key" ] && KF="$KF -r $DB_KEYS/dropbear_ecdsa_host_key"
+
+    # Crear/actualizar wrapper
+    local WS="/usr/local/bin/msy-wrap-${PPUB}.sh"
+    cat > "$WS" <<WRAP
+#!/bin/bash
+read -t 10 -r L
+if   [[ "\$L" == SSH-* ]];      then { printf '%s\r\n' "\$L"; cat; } | socat - TCP:127.0.0.1:${PINT}
+elif [[ "\$L" == CONNECT\ * ]]; then printf 'HTTP/1.0 200 Connection established\r\n\r\n'; socat - TCP:127.0.0.1:${PINT}
+elif [[ -z "\$L" ]];            then socat - TCP:127.0.0.1:${PINT}
+else                                 printf 'HTTP/1.0 400 Bad Request\r\nContent-Length: 0\r\n\r\n'
+fi
+WRAP
+    chmod +x "$WS"
+
+    cat > "/etc/systemd/system/${SVC}.service" <<DBSVC
 [Unit]
-Description=Dropbear SSH ${VER} - Puerto 143 (MSY VPN)
+Description=Dropbear $VER :${PINT} interno MSY VPN
 After=network.target
-Wants=network.target
 
 [Service]
 Type=simple
-ExecStart=${BIN} -F -E \\
-    -p 0.0.0.0:143 \\
-    ${KEY_FLAGS} \\
-    -b /etc/dropbear-legacy/banner.txt \\
-    -K 60 -I 300
+ExecStart=${BIN} -F -E -p 127.0.0.1:${PINT} ${KF} -b ${DB_KEYS}/banner.txt -K 120 -I 600
 Restart=always
-RestartSec=5
+RestartSec=3
 KillMode=process
 StandardOutput=null
 StandardError=null
+LimitNOFILE=65536
 
 [Install]
 WantedBy=multi-user.target
 DBSVC
 
-    systemctl daemon-reload
-    systemctl enable dropbear-legacy >/dev/null 2>&1
-    systemctl restart dropbear-legacy
-    sleep 2
+    cat > "/etc/systemd/system/${WR_SVC}.service" <<WRSVC
+[Unit]
+Description=MSY Wrapper :${PPUB}→:${PINT} (Dropbear)
+After=network.target
 
-    if systemctl is-active --quiet dropbear-legacy; then
-        echo "$VER"  > /etc/dropbear-legacy/active_version.txt
-        echo "$BIN"  > /etc/dropbear-legacy/active_bin.txt
-        echo "✓ Dropbear $VER activo en 0.0.0.0:143"
+[Service]
+Type=simple
+ExecStart=/usr/bin/socat TCP-LISTEN:${PPUB},reuseaddr,fork,backlog=256 EXEC:${WS}
+Restart=always
+RestartSec=3
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
+WRSVC
+
+    systemctl daemon-reload
+    systemctl enable "$SVC" "$WR_SVC" >/dev/null 2>&1
+    systemctl restart "$SVC"
+    sleep 1
+
+    if systemctl is-active --quiet "$SVC"; then
+        systemctl restart "$WR_SVC"
+        sleep 1
+        if systemctl is-active --quiet "$WR_SVC"; then
+            echo "✓ Dropbear $VER activo en :${PPUB} (con wrapper)"
+        else
+            # Directo sin wrapper
+            systemctl stop "$SVC" 2>/dev/null
+            fuser -k "${PPUB}/tcp" 2>/dev/null
+            sed -i "s|127.0.0.1:${PINT}|0.0.0.0:${PPUB}|g" "/etc/systemd/system/${SVC}.service"
+            systemctl daemon-reload
+            systemctl restart "$SVC"
+            sleep 1
+            systemctl is-active --quiet "$SVC" \
+                && echo "✓ Dropbear $VER activo en :${PPUB} (directo)" \
+                || { echo "✗ Dropbear $VER no pudo iniciar"; journalctl -u "$SVC" --no-pager -n 8; return 1; }
+        fi
+        [ "$PPUB" = "143" ] && echo "$VER" > "$DB_KEYS/active_version.txt" && echo "$BIN" > "$DB_KEYS/active_bin.txt"
+        echo "✓ Listo"
     else
-        echo "✗ Dropbear $VER no inició — log:"
-        journalctl -u dropbear-legacy --no-pager -n 10 2>/dev/null || true
-        echo ""
-        echo "  Intento directo:"
-        $BIN -F -E -p 0.0.0.0:143 $KEY_FLAGS \
-            -b /etc/dropbear-legacy/banner.txt -K 60 -I 300 2>&1 | head -5
+        echo "✗ Dropbear $VER no inició"
+        journalctl -u "$SVC" --no-pager -n 8 2>/dev/null
+        return 1
+    fi
+}
+
+# ============================================================
+# FUNCIÓN: RECOMPILAR DROPBEAR DESDE FUENTE
+# Idéntica a mod_ssh.sh para coherencia
+# ============================================================
+_recompilar_dropbear() {
+    local VER="$1"   # "2016.74" o "2019.78"
+    local URL="$2"
+    local PREFIX="$3"
+    local CF="$4"
+    local DEST_BIN="$DB_DIR/dropbear-${VER}"
+    local DEST_KEY="$DB_DIR/dropbearkey-${VER}"
+    local TB="dropbear-${VER}.tar.bz2"
+
+    echo "Descargando dropbear-${VER}..."
+    cd /usr/src
+    wget -q --timeout=90 -O "$TB" "$URL" 2>/dev/null \
+    || wget -q --timeout=90 -O "$TB" "https://dropbear.nl/mirror/releases/$TB" 2>/dev/null
+
+    if [ ! -s "$TB" ]; then
+        echo "✗ No se pudo descargar el tarball"
+        cd /root; return 1
+    fi
+
+    rm -rf "/usr/src/dropbear-${VER}"
+    tar xjf "$TB" -C /usr/src 2>/dev/null
+    cd "/usr/src/dropbear-${VER}" || { echo "✗ Error extrayendo"; cd /root; return 1; }
+
+    for f in sysoptions.h default_options.h options.h; do
+        [ -f "$f" ] && grep -q "LOCAL_IDENT" "$f" && \
+            sed -i 's|#define LOCAL_IDENT.*|#define LOCAL_IDENT "SSH-2.0-ByJuanitoProSniff"|' "$f"
+    done
+
+    export CFLAGS="$CF"
+    ./configure --prefix="$PREFIX" --disable-zlib --disable-wtmp --disable-lastlog >/dev/null 2>&1
+
+    echo "Compilando... (puede tardar 2-5 minutos)"
+    if echo "$VER" | grep -q "^2016"; then
+        echo "  → Sublibs en -j1 primero (necesario para 2016)..."
+        [ -d libtommath  ] && make -C libtommath  -j1 CFLAGS="$CF" >/dev/null 2>&1
+        [ -d libtomcrypt ] && make -C libtomcrypt -j1 CFLAGS="$CF" >/dev/null 2>&1
+    fi
+    make -j$(nproc) PROGRAMS="dropbear dropbearkey" CFLAGS="$CF" >/tmp/recomp_${VER}.log 2>&1
+
+    if make install PROGRAMS="dropbear dropbearkey" >/dev/null 2>&1 \
+            && [ -x "${PREFIX}/sbin/dropbear" ]; then
+        cp "${PREFIX}/sbin/dropbear"   "$DEST_BIN"
+        cp "${PREFIX}/bin/dropbearkey" "$DEST_KEY" 2>/dev/null
+        chmod +x "$DEST_BIN" "$DEST_KEY" 2>/dev/null
+        unset CFLAGS
+        VER_CORTA=$(echo "$VER" | cut -d. -f1)
+        echo "1" > "$DB_KEYS/has_${VER_CORTA}.txt"
+        echo "✓ Dropbear $VER compilado correctamente"
+        cd /root; return 0
+    else
+        unset CFLAGS
+        echo "✗ Compilación fallida — últimas líneas:"
+        tail -8 "/tmp/recomp_${VER}.log" 2>/dev/null
+        cd /root; return 1
     fi
 }
 
@@ -147,14 +241,14 @@ menu_principal() {
     while true; do
         clear
 
-        # IP pública siempre en IPv4
         IP=$(curl -4 -s --max-time 5 ifconfig.me 2>/dev/null \
           || curl -4 -s --max-time 5 api4.ipify.org 2>/dev/null \
           || hostname -I | tr ' ' '\n' | grep -v ':' | head -1)
 
-        # Estados de puertos
+        # Estado de puertos
         S_SSH=$(port_status 22 t)
-        S_DB=$(port_status 143 t)
+        S_DB143=$(port_status 143 t)
+        S_DB142=$(port_status 142 t)
         S_SSL443=$(port_status 443 t)
         S_SSL444=$(port_status 444 t)
         S_SSL777=$(port_status 777 t)
@@ -162,24 +256,34 @@ menu_principal() {
         S_P8080=$(port_status 8080 t)
         S_P8880=$(port_status 8880 t)
         S_P8888=$(port_status 8888 t)
-        # BadVPN y Hysteria: estados separados
         S_BADVPN=$(port_status 7300 u)
-        S_HYSTERIA=$(systemctl is-active --quiet hysteria 2>/dev/null && echo -e "\033[1;32mON\033[0m" || echo -e "\033[1;31mOFF\033[0m")
+        S_HYSTERIA=$(systemctl is-active --quiet hysteria 2>/dev/null \
+            && echo -e "\033[1;32mON\033[0m" || echo -e "\033[1;31mOFF\033[0m")
 
-        # Versión activa de Dropbear
-        DB_VER=$(_db_active_ver)
+        # Versiones activas
+        DB_VER143=$(cat "$DB_KEYS/active_version.txt" 2>/dev/null || echo "?")
+        # Para puerto 142, detectar cuál está corriendo
+        if systemctl is-active --quiet dropbear-2019-78 2>/dev/null \
+           || systemctl is-active --quiet msy-wrap-142 2>/dev/null; then
+            DB_VER142="2019.78"
+        else
+            DB_VER142="---"
+        fi
 
         echo -e "${CYAN}╔══════════════════════════════════════════════╗${NC}"
-        echo -e "${CYAN}║${NC}     ${BOLD}MSY VPN PANEL - v104 Minimalista${NC}    ${CYAN}║${NC}"
+        echo -e "${CYAN}║${NC}      ${BOLD}MSY VPN PANEL - v105${NC}              ${CYAN}║${NC}"
+        echo -e "${CYAN}║${NC}      t.me/FREEINTERNETVPNMSY              ${CYAN}║${NC}"
         echo -e "${CYAN}╚══════════════════════════════════════════════╝${NC}"
         echo -e " ${GREEN}IP:${NC} ${YELLOW}$IP${NC}"
         echo ""
         echo -e " ${CYAN}━━━ PUERTOS ACTIVOS ━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-        echo -e "  SSH   :22   $S_SSH    │  DB${DB_VER}  :143  $S_DB"
-        echo -e "  SSL   :443  $S_SSL443  │  SSL      :444  $S_SSL444"
-        echo -e "  SSL   :777  $S_SSL777"
-        echo -e "  Proxy :80   $S_P80    │  Proxy   :8080  $S_P8080"
-        echo -e "  Proxy :8880 $S_P8880  │  Proxy   :8888  $S_P8888"
+        echo -e "  SSH       :22   $S_SSH"
+        echo -e "  DB v${DB_VER143}  :143  $S_DB143  ← Principal"
+        echo -e "  DB v${DB_VER142}  :142  $S_DB142  ← Secundario"
+        echo -e "  SSL       :443  $S_SSL443  │  SSL  :444  $S_SSL444"
+        echo -e "  SSL       :777  $S_SSL777"
+        echo -e "  Proxy     :80   $S_P80    │  Proxy :8080  $S_P8080"
+        echo -e "  Proxy     :8880 $S_P8880  │  Proxy :8888  $S_P8888"
         echo -e " ${CYAN}━━━ UDP ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
         echo -e "  BadVPN UDPGW :7300  $S_BADVPN"
         echo -e "  Hysteria UDP        $S_HYSTERIA"
@@ -188,7 +292,7 @@ menu_principal() {
         echo -e " ${BLUE}1)${NC} Crear usuario       ${BLUE}2)${NC} Eliminar usuario"
         echo -e " ${BLUE}3)${NC} Ver conectados      ${BLUE}4)${NC} Proxies Python"
         echo -e " ${BLUE}5)${NC} Túneles SSL/TLS     ${BLUE}6)${NC} Banner HTTP proxy"
-        echo -e " ${BLUE}7)${NC} Dropbear (v${DB_VER})     ${BLUE}8)${NC} Hysteria UDP"
+        echo -e " ${BLUE}7)${NC} Dropbear :143/:142  ${BLUE}8)${NC} Hysteria UDP"
         echo -e " ${BLUE}9)${NC} Estado servicios   ${BLUE}10)${NC} Reiniciar servicios"
         echo -e "${RED} D)${NC} Desinstalar script  ${RED} 0)${NC} Salir"
         echo -e " ${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
@@ -218,7 +322,8 @@ menu_principal() {
                     expiry="Ilimitado"
                 fi
 
-                cat > /etc/ssh-vpn/users/$username.txt <<USEREOF
+                mkdir -p /etc/ssh-vpn/users
+                cat > "/etc/ssh-vpn/users/$username.txt" <<USEREOF
 Usuario: $username
 Contraseña: $password
 Fecha creación: $(date +%Y-%m-%d)
@@ -241,7 +346,7 @@ USEREOF
                 fi
                 pkill -9 -u "$username" 2>/dev/null
                 userdel -r "$username" 2>/dev/null
-                rm -f /etc/ssh-vpn/users/$username.txt
+                rm -f "/etc/ssh-vpn/users/$username.txt"
                 echo "✓ Usuario $username eliminado"
                 read -p "ENTER para continuar..."
                 ;;
@@ -271,13 +376,15 @@ USEREOF
                         read -p "Banner [ENTER = default]: " banner
                         banner=${banner:-'<span style="background-color: #000000;"><span style="color:#eeff01;">MSY VPN SCRIPT</span></span>'}
                         echo "Backend SSH:"
-                        echo "  1) Dropbear :143 (default)"
-                        echo "  2) OpenSSH  :22"
-                        echo "  3) Otro puerto"
+                        echo "  1) Dropbear :143 (principal — 2016.74)"
+                        echo "  2) Dropbear :142 (secundario — 2019.78)"
+                        echo "  3) OpenSSH  :22"
+                        echo "  4) Otro puerto"
                         read -p "Opción [1]: " backend
                         case $backend in
-                            2) ssh_port=22 ;;
-                            3) read -p "Puerto: " ssh_port ;;
+                            2) ssh_port=142 ;;
+                            3) ssh_port=22 ;;
+                            4) read -p "Puerto: " ssh_port ;;
                             *) ssh_port=143 ;;
                         esac
                         start_proxy "$port" "$response" "$banner" "$ssh_port"
@@ -293,8 +400,7 @@ USEREOF
                         done
                         screen -ls 2>/dev/null | grep -q "proxy-" || echo "  Ninguno activo"
                         echo ""
-                        echo "Config guardada:"
-                        cat /etc/proxy-python/proxies.conf 2>/dev/null || echo "  Sin config"
+                        cat /etc/proxy-python/proxies.conf 2>/dev/null || echo "  Sin config guardada"
                         read -p "ENTER..."
                         ;;
                     4)
@@ -329,8 +435,8 @@ USEREOF
                         ss -tlnp 2>/dev/null | grep stunnel || echo "  (ninguno)"
                         echo ""
                         pgrep -x stunnel4 >/dev/null 2>&1 \
-                            && echo -e "${GREEN}✓ Stunnel proceso activo (PID: $(pgrep -x stunnel4 | head -1))${NC}" \
-                            || echo -e "${RED}✗ Stunnel proceso NO activo${NC}"
+                            && echo -e "${GREEN}✓ Stunnel activo (PID: $(pgrep -x stunnel4 | head -1))${NC}" \
+                            || echo -e "${RED}✗ Stunnel NO activo${NC}"
                         read -p "ENTER..."
                         ;;
                     2)
@@ -340,8 +446,9 @@ USEREOF
                         read -p "Nombre del túnel (ej: tunnel-8443): " tunnel_name
                         read -p "Puerto de escucha (ej: 8443): " tunnel_port
                         echo "Backend destino:"
-                        echo "  22  - OpenSSH"
-                        echo "  143 - Dropbear (recomendado)"
+                        echo "  143 - Dropbear 2016.74 (principal)"
+                        echo "  142 - Dropbear 2019.78 (secundario)"
+                        echo "   22 - OpenSSH"
                         read -p "Puerto destino [143]: " tunnel_dest
                         tunnel_dest=${tunnel_dest:-143}
                         ssl_add_port "$tunnel_name" "$tunnel_port" "$tunnel_dest"
@@ -383,97 +490,152 @@ USEREOF
             7)
                 # ============================================================
                 # SUB-MENÚ DROPBEAR
+                # Permite cambiar la versión en :143 y en :142 independientemente
                 # ============================================================
                 while true; do
                     clear
-                    DB_VER_NOW=$(_db_active_ver)
                     DB2016=$(_db_has_2016)
                     DB2019=$(_db_has_2019)
 
+                    # Detectar qué corre en cada puerto
+                    if systemctl is-active --quiet dropbear-2016-74 2>/dev/null \
+                       || systemctl is-active --quiet msy-wrap-143 2>/dev/null; then
+                        VER143_ACTIVA="2016.74"
+                    elif ss -tlnp 2>/dev/null | grep -q ":143 "; then
+                        VER143_ACTIVA="(activo)"
+                    else
+                        VER143_ACTIVA="inactivo"
+                    fi
+
+                    if systemctl is-active --quiet dropbear-2019-78 2>/dev/null \
+                       || systemctl is-active --quiet msy-wrap-142 2>/dev/null; then
+                        VER142_ACTIVA="2019.78"
+                    elif ss -tlnp 2>/dev/null | grep -q ":142 "; then
+                        VER142_ACTIVA="(activo)"
+                    else
+                        VER142_ACTIVA="inactivo"
+                    fi
+
+                    ST143=$(_db_port_status "2016.74" 143)
+                    ST142=$(_db_port_status "2019.78" 142)
+
                     echo -e "${CYAN}╔══════════════════════════════════════════════╗${NC}"
-                    echo -e "${CYAN}║${NC}         ${BOLD}GESTIÓN DROPBEAR SSH :143${NC}        ${CYAN}║${NC}"
+                    echo -e "${CYAN}║${NC}       ${BOLD}GESTIÓN DROPBEAR - MSY VPN${NC}        ${CYAN}║${NC}"
                     echo -e "${CYAN}╚══════════════════════════════════════════════╝${NC}"
                     echo ""
-                    echo -e " Versión activa: ${YELLOW}${DB_VER_NOW}${NC}"
+                    echo -e " ${CYAN}━━━ PUERTOS DROPBEAR ━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+                    echo -e "  Puerto ${YELLOW}:143${NC} → versión activa: ${YELLOW}${VER143_ACTIVA}${NC}  $ST143"
+                    echo -e "  Puerto ${YELLOW}:142${NC} → versión activa: ${YELLOW}${VER142_ACTIVA}${NC}  $ST142"
                     echo ""
-                    echo " Estado del puerto 143: $(port_status 143 t)"
-                    echo " Servicio systemd:      $(systemctl is-active dropbear-legacy 2>/dev/null || echo inactive)"
-                    echo ""
-                    echo -e " ${CYAN}━━━ VERSIONES DISPONIBLES ━━━━━━━━━━━━━━━━━━${NC}"
-
-                    # Mostrar disponibilidad con estado visual
+                    echo -e " ${CYAN}━━━ VERSIONES COMPILADAS ━━━━━━━━━━━━━━━━━━━${NC}"
                     if [ "$DB2016" = "1" ]; then
-                        echo -e "  ${GREEN}✓${NC} Dropbear 2016.74  (/opt/dropbear-2016)"
+                        echo -e "  ${GREEN}✓${NC} 2016.74  → $DB_DIR/dropbear-2016.74"
                     else
-                        echo -e "  ${RED}✗${NC} Dropbear 2016.74  (no compilado)"
+                        echo -e "  ${RED}✗${NC} 2016.74  → no compilado"
                     fi
                     if [ "$DB2019" = "1" ]; then
-                        echo -e "  ${GREEN}✓${NC} Dropbear 2019.78  (/opt/dropbear-2019)"
+                        echo -e "  ${GREEN}✓${NC} 2019.78  → $DB_DIR/dropbear-2019.78"
                     else
-                        echo -e "  ${RED}✗${NC} Dropbear 2019.78  (no compilado)"
+                        echo -e "  ${RED}✗${NC} 2019.78  → no compilado"
                     fi
-                    echo -e "  ${GREEN}✓${NC} OpenSSH fallback  (siempre disponible)"
+                    echo -e "  ${GREEN}✓${NC} OpenSSH  → siempre disponible (fallback)"
                     echo ""
-                    echo -e " ${CYAN}━━━ ACCIONES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-                    echo -e " ${BLUE}1)${NC} Activar Dropbear 2016.74"
-                    echo -e " ${BLUE}2)${NC} Activar Dropbear 2019.78"
-                    echo -e " ${BLUE}3)${NC} Activar OpenSSH fallback en :143"
-                    echo -e " ${BLUE}4)${NC} Reiniciar Dropbear activo"
-                    echo -e " ${BLUE}5)${NC} Ver log de Dropbear (últimas 20 líneas)"
-                    echo -e " ${BLUE}6)${NC} Cambiar banner Dropbear"
-                    echo -e " ${BLUE}7)${NC} Recompilar Dropbear 2016.74"
-                    echo -e " ${BLUE}8)${NC} Recompilar Dropbear 2019.78"
-                    echo -e " ${BLUE}0)${NC} Volver al menú principal"
-                    echo -e " ${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+                    echo -e " ${CYAN}━━━ CAMBIAR VERSIÓN EN PUERTO 143 ━━━━━━━━━━━${NC}"
+                    echo -e " ${BLUE}1)${NC} Poner Dropbear ${YELLOW}2016.74${NC} en :143 (recomendado)"
+                    echo -e " ${BLUE}2)${NC} Poner Dropbear ${YELLOW}2019.78${NC} en :143"
+                    echo -e " ${BLUE}3)${NC} Poner OpenSSH (fallback) en :143"
+                    echo ""
+                    echo -e " ${CYAN}━━━ CAMBIAR VERSIÓN EN PUERTO 142 ━━━━━━━━━━━${NC}"
+                    echo -e " ${BLUE}4)${NC} Poner Dropbear ${YELLOW}2019.78${NC} en :142 (recomendado)"
+                    echo -e " ${BLUE}5)${NC} Poner Dropbear ${YELLOW}2016.74${NC} en :142"
+                    echo -e " ${BLUE}6)${NC} Desactivar puerto :142"
+                    echo ""
+                    echo -e " ${CYAN}━━━ OTRAS ACCIONES ━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+                    echo -e " ${BLUE}7)${NC} Reiniciar ambos puertos Dropbear"
+                    echo -e " ${BLUE}8)${NC} Ver log Dropbear :143"
+                    echo -e " ${BLUE}9)${NC} Ver log Dropbear :142"
+                    echo -e " ${BLUE}10)${NC} Cambiar banner Dropbear"
+                    echo -e " ${BLUE}11)${NC} Recompilar Dropbear 2016.74"
+                    echo -e " ${BLUE}12)${NC} Recompilar Dropbear 2019.78"
+                    echo -e " ${BLUE}0)${NC}  Volver al menú principal"
+                    echo -e " ${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
                     read -p " Opción: " db_opt
 
                     case $db_opt in
                         1)
                             if [ "$DB2016" != "1" ]; then
-                                echo "✗ Dropbear 2016.74 no está compilado"
-                                echo "  Usa la opción 7 para recompilarlo"
+                                echo "✗ 2016.74 no compilado — usa opción 11"
                             else
-                                activar_dropbear "2016"
+                                _cambiar_dropbear_puerto "2016.74" 143 1143
                             fi
                             read -p "ENTER..."
                             ;;
                         2)
                             if [ "$DB2019" != "1" ]; then
-                                echo "✗ Dropbear 2019.78 no está compilado"
-                                echo "  Usa la opción 8 para recompilarlo"
+                                echo "✗ 2019.78 no compilado — usa opción 12"
                             else
-                                activar_dropbear "2019"
+                                _cambiar_dropbear_puerto "2019.78" 143 1143
                             fi
                             read -p "ENTER..."
                             ;;
                         3)
-                            activar_dropbear "ssh_fallback"
+                            _cambiar_dropbear_puerto "ssh_fallback" 143 1143
                             read -p "ENTER..."
                             ;;
                         4)
-                            echo "Reiniciando Dropbear..."
-                            systemctl restart dropbear-legacy 2>/dev/null
-                            sleep 2
-                            systemctl is-active --quiet dropbear-legacy \
-                                && echo "✓ Dropbear reiniciado" \
-                                || echo "✗ Error al reiniciar — ver opción 5"
+                            if [ "$DB2019" != "1" ]; then
+                                echo "✗ 2019.78 no compilado — usa opción 12"
+                            else
+                                _cambiar_dropbear_puerto "2019.78" 142 1142
+                            fi
                             read -p "ENTER..."
                             ;;
                         5)
-                            clear
-                            echo "LOG DROPBEAR (últimas 20 líneas):"
-                            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-                            journalctl -u dropbear-legacy --no-pager -n 20 2>/dev/null \
-                                || echo "  Sin logs disponibles"
-                            echo ""
+                            if [ "$DB2016" != "1" ]; then
+                                echo "✗ 2016.74 no compilado — usa opción 11"
+                            else
+                                _cambiar_dropbear_puerto "2016.74" 142 1142
+                            fi
                             read -p "ENTER..."
                             ;;
                         6)
+                            echo "Desactivando puerto 142..."
+                            systemctl stop dropbear-2019-78 msy-wrap-142 2>/dev/null
+                            fuser -k 142/tcp 2>/dev/null
+                            echo "✓ Puerto 142 desactivado"
+                            read -p "ENTER..."
+                            ;;
+                        7)
+                            echo "Reiniciando Dropbear :143 y :142..."
+                            systemctl restart dropbear-2016-74 msy-wrap-143 2>/dev/null
+                            systemctl restart dropbear-2019-78 msy-wrap-142 2>/dev/null
+                            sleep 2
+                            echo -e ":143 $(port_status 143 t)"
+                            echo -e ":142 $(port_status 142 t)"
+                            read -p "ENTER..."
+                            ;;
+                        8)
+                            clear
+                            echo "LOG Dropbear :143 (últimas 25 líneas):"
+                            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                            journalctl -u dropbear-2016-74 --no-pager -n 25 2>/dev/null \
+                                || echo "  Sin logs disponibles"
+                            read -p "ENTER..."
+                            ;;
+                        9)
+                            clear
+                            echo "LOG Dropbear :142 (últimas 25 líneas):"
+                            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                            journalctl -u dropbear-2019-78 --no-pager -n 25 2>/dev/null \
+                                || echo "  Sin logs disponibles"
+                            read -p "ENTER..."
+                            ;;
+                        10)
                             clear
                             echo "BANNER DROPBEAR"
                             echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
                             echo "Banner actual:"
-                            cat /etc/dropbear-legacy/banner.txt 2>/dev/null || echo "(vacío)"
+                            cat "$DB_KEYS/banner.txt" 2>/dev/null || echo "(vacío)"
                             echo ""
                             echo "Nuevo banner (escribe FIN en línea sola para terminar):"
                             > /tmp/new_banner.txt
@@ -483,74 +645,56 @@ USEREOF
                                 echo "$line" >> /tmp/new_banner.txt
                             done
                             if [ -s /tmp/new_banner.txt ]; then
-                                cp /tmp/new_banner.txt /etc/dropbear-legacy/banner.txt
-                                systemctl restart dropbear-legacy 2>/dev/null
+                                cp /tmp/new_banner.txt "$DB_KEYS/banner.txt"
+                                systemctl restart dropbear-2016-74 dropbear-2019-78 2>/dev/null
                                 echo "✓ Banner actualizado y Dropbear reiniciado"
                             fi
                             rm -f /tmp/new_banner.txt
                             read -p "ENTER..."
                             ;;
-                        7|8)
-                            VER_RECOMP="2016.74"; URL_RECOMP="https://matt.ucc.asn.au/dropbear/releases/dropbear-2016.74.tar.bz2"; PREFIX_RECOMP="/opt/dropbear-2016"
-                            [ "$db_opt" = "8" ] && { VER_RECOMP="2019.78"; URL_RECOMP="https://matt.ucc.asn.au/dropbear/releases/dropbear-2019.78.tar.bz2"; PREFIX_RECOMP="/opt/dropbear-2019"; }
-
+                        11)
                             clear
-                            echo "RECOMPILAR Dropbear $VER_RECOMP"
+                            echo "RECOMPILAR Dropbear 2016.74"
                             echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-
-                            GCC_VER_NOW=$(gcc -dumpversion 2>/dev/null | cut -d. -f1); GCC_VER_NOW=${GCC_VER_NOW:-0}
-                            COMPAT_CF=""
-                            [ "$GCC_VER_NOW" -ge 12 ] 2>/dev/null && \
-                                COMPAT_CF="-Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=int-conversion -Wno-error=incompatible-pointer-types"
-
-                            cd /usr/src
-                            TARBALL="dropbear-${VER_RECOMP}.tar.bz2"
-                            [ ! -f "$TARBALL" ] || [ ! -s "$TARBALL" ] && \
-                                wget -q -O "$TARBALL" "$URL_RECOMP" 2>/dev/null
-
-                            # Mirror alternativo
-                            [ ! -s "$TARBALL" ] && \
-                                wget -q -O "$TARBALL" "https://dropbear.nl/mirror/releases/$TARBALL" 2>/dev/null
-
-                            if [ ! -s "$TARBALL" ]; then
-                                echo "✗ No se pudo descargar el tarball"
-                                cd /root; read -p "ENTER..."; continue
-                            fi
-
-                            rm -rf "/usr/src/dropbear-${VER_RECOMP}" 2>/dev/null
-                            tar xjf "$TARBALL" -C /usr/src 2>/dev/null
-                            cd "/usr/src/dropbear-${VER_RECOMP}"
-
-                            for f in sysoptions.h default_options.h options.h; do
-                                [ -f "$f" ] && grep -q "LOCAL_IDENT" "$f" && \
-                                    sed -i 's|#define LOCAL_IDENT.*|#define LOCAL_IDENT "SSH-2.0-ByJuanitoProSniff"|' "$f"
-                            done
-
-                            export CFLAGS="$COMPAT_CF"
-                            ./configure --prefix="$PREFIX_RECOMP" \
-                                --disable-zlib --disable-wtmp --disable-lastlog \
-                                >/dev/null 2>&1
-
-                            echo "Compilando... (2-4 min)"
-                            if make -j$(nproc) PROGRAMS="dropbear dropbearkey" \
-                                    CFLAGS="$COMPAT_CF" >/tmp/recomp_db.log 2>&1; then
-                                make install PROGRAMS="dropbear dropbearkey" >/dev/null 2>&1
-                                unset CFLAGS
-                                if [ -f "${PREFIX_RECOMP}/sbin/dropbear" ]; then
-                                    echo "✓ Dropbear $VER_RECOMP compilado"
-                                    NUEVO_VER=$(echo "$VER_RECOMP" | cut -d. -f1)
-                                    echo "1" > "/etc/dropbear-legacy/has_${NUEVO_VER}.txt"
-                                    read -p "¿Activar ahora? (s/n): " act
-                                    [[ $act == "s" || $act == "S" ]] && activar_dropbear "$NUEVO_VER"
-                                else
-                                    echo "✗ Compilación falló — binario no encontrado"
-                                fi
+                            # Determinar flags según GCC
+                            GCC_NOW=$(gcc -dumpversion 2>/dev/null | cut -d. -f1); GCC_NOW=${GCC_NOW:-0}
+                            if [ "$GCC_NOW" -ge 10 ] 2>/dev/null; then
+                                CF_2016="-w -fcommon -Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=int-conversion -Wno-error=incompatible-pointer-types -Wno-error=deprecated-declarations"
                             else
-                                unset CFLAGS
-                                echo "✗ Compilación falló — error:"
-                                tail -10 /tmp/recomp_db.log
+                                CF_2016="-w -fcommon"
                             fi
-                            cd /root
+                            DEBIAN_FRONTEND=noninteractive apt-get install -y -qq gcc make libc6-dev 2>/dev/null
+                            _recompilar_dropbear \
+                                "2016.74" \
+                                "https://matt.ucc.asn.au/dropbear/releases/dropbear-2016.74.tar.bz2" \
+                                "/opt/dropbear-2016" \
+                                "$CF_2016"
+                            if [ $? -eq 0 ]; then
+                                read -p "¿Activar 2016.74 en :143 ahora? (s/n): " act
+                                [[ $act == "s" || $act == "S" ]] && _cambiar_dropbear_puerto "2016.74" 143 1143
+                            fi
+                            read -p "ENTER..."
+                            ;;
+                        12)
+                            clear
+                            echo "RECOMPILAR Dropbear 2019.78"
+                            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                            GCC_NOW=$(gcc -dumpversion 2>/dev/null | cut -d. -f1); GCC_NOW=${GCC_NOW:-0}
+                            if [ "$GCC_NOW" -ge 12 ] 2>/dev/null; then
+                                CF_2019="-w -fcommon -Wno-error=deprecated-declarations"
+                            else
+                                CF_2019="-w -fcommon"
+                            fi
+                            DEBIAN_FRONTEND=noninteractive apt-get install -y -qq gcc make libc6-dev 2>/dev/null
+                            _recompilar_dropbear \
+                                "2019.78" \
+                                "https://matt.ucc.asn.au/dropbear/releases/dropbear-2019.78.tar.bz2" \
+                                "/opt/dropbear-2019" \
+                                "$CF_2019"
+                            if [ $? -eq 0 ]; then
+                                read -p "¿Activar 2019.78 en :142 ahora? (s/n): " act
+                                [[ $act == "s" || $act == "S" ]] && _cambiar_dropbear_puerto "2019.78" 142 1142
+                            fi
                             read -p "ENTER..."
                             ;;
                         0) break ;;
@@ -588,23 +732,41 @@ USEREOF
                 echo -e "${CYAN}║${NC}          ${BOLD}ESTADO DE SERVICIOS${NC}             ${CYAN}║${NC}"
                 echo -e "${CYAN}╚════════════════════════════════════════════╝${NC}"
                 echo ""
-                DB_VER_NOW=$(_db_active_ver)
+
                 systemctl is-active --quiet ssh \
-                    && echo -e "${GREEN}✓ OpenSSH:         Activo${NC}  (puerto 22)" \
-                    || echo -e "${RED}✗ OpenSSH:         Inactivo${NC}"
-                systemctl is-active --quiet dropbear-legacy 2>/dev/null \
-                    && echo -e "${GREEN}✓ Dropbear ${DB_VER_NOW}:  Activo${NC}  (puerto 143)" \
-                    || echo -e "${RED}✗ Dropbear ${DB_VER_NOW}:  Inactivo${NC}"
+                    && echo -e "${GREEN}✓ OpenSSH:          Activo${NC}  (puerto 22)" \
+                    || echo -e "${RED}✗ OpenSSH:          Inactivo${NC}"
+
+                # Dropbear :143
+                if systemctl is-active --quiet dropbear-2016-74 2>/dev/null \
+                   || systemctl is-active --quiet msy-wrap-143 2>/dev/null; then
+                    echo -e "${GREEN}✓ Dropbear :143:    Activo${NC}  (v2016.74 — principal)"
+                elif ss -tlnp 2>/dev/null | grep -q ":143 "; then
+                    echo -e "${GREEN}✓ Puerto :143:      Activo${NC}  (servicio alternativo)"
+                else
+                    echo -e "${RED}✗ Dropbear :143:    Inactivo${NC}"
+                fi
+
+                # Dropbear :142
+                if systemctl is-active --quiet dropbear-2019-78 2>/dev/null \
+                   || systemctl is-active --quiet msy-wrap-142 2>/dev/null; then
+                    echo -e "${GREEN}✓ Dropbear :142:    Activo${NC}  (v2019.78 — secundario)"
+                elif ss -tlnp 2>/dev/null | grep -q ":142 "; then
+                    echo -e "${GREEN}✓ Puerto :142:      Activo${NC}  (servicio alternativo)"
+                else
+                    echo -e "${YELLOW}⚠ Dropbear :142:    Inactivo${NC}"
+                fi
+
                 systemctl is-active --quiet stunnel4 \
-                    && echo -e "${GREEN}✓ Stunnel SSL:     Activo${NC}  (443, 444, 777)" \
-                    || echo -e "${RED}✗ Stunnel SSL:     Inactivo${NC}"
-                # BadVPN y Hysteria separados
+                    && echo -e "${GREEN}✓ Stunnel SSL:      Activo${NC}  (443, 444, 777)" \
+                    || echo -e "${RED}✗ Stunnel SSL:      Inactivo${NC}"
                 systemctl is-active --quiet badvpn-udpgw \
-                    && echo -e "${GREEN}✓ BadVPN UDPGW:    Activo${NC}  (UDP :7300)" \
-                    || echo -e "${RED}✗ BadVPN UDPGW:    Inactivo${NC}"
+                    && echo -e "${GREEN}✓ BadVPN UDPGW:     Activo${NC}  (UDP :7300)" \
+                    || echo -e "${RED}✗ BadVPN UDPGW:     Inactivo${NC}"
                 systemctl is-active --quiet hysteria 2>/dev/null \
-                    && echo -e "${GREEN}✓ Hysteria UDP:    Activo${NC}" \
-                    || echo -e "${YELLOW}⚠ Hysteria UDP:    No instalado / Inactivo${NC}"
+                    && echo -e "${GREEN}✓ Hysteria UDP:     Activo${NC}" \
+                    || echo -e "${YELLOW}⚠ Hysteria UDP:     No instalado / Inactivo${NC}"
+
                 echo ""
                 active_proxies=$(screen -ls 2>/dev/null | grep -c "proxy-")
                 echo -e "${YELLOW}Python Proxies activos:${NC} $active_proxies"
@@ -613,10 +775,14 @@ USEREOF
                 echo -e "${YELLOW}RAM:${NC}   $(free -h | awk '/^Mem/{print $3"/"$2}')"
                 echo -e "${YELLOW}Swap:${NC}  $(free -h | awk '/^Swap/{print $3"/"$2}')"
                 echo ""
-                echo -e "${CYAN}━━━ DROPBEAR DISPONIBLES ━━━━━━━━━━━━━━━━━━━━━${NC}"
-                [ "$(_db_has_2016)" = "1" ] && echo -e "  ${GREEN}✓${NC} 2016.74  /opt/dropbear-2016/sbin/dropbear" || echo -e "  ${RED}✗${NC} 2016.74  no compilado"
-                [ "$(_db_has_2019)" = "1" ] && echo -e "  ${GREEN}✓${NC} 2019.78  /opt/dropbear-2019/sbin/dropbear" || echo -e "  ${RED}✗${NC} 2019.78  no compilado"
-                echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+                echo -e "${CYAN}━━━ BINARIOS DROPBEAR ━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+                [ "$(_db_has_2016)" = "1" ] \
+                    && echo -e "  ${GREEN}✓${NC} 2016.74  $DB_DIR/dropbear-2016.74" \
+                    || echo -e "  ${RED}✗${NC} 2016.74  no compilado"
+                [ "$(_db_has_2019)" = "1" ] \
+                    && echo -e "  ${GREEN}✓${NC} 2019.78  $DB_DIR/dropbear-2019.78" \
+                    || echo -e "  ${RED}✗${NC} 2019.78  no compilado"
+                echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
                 read -p "ENTER para continuar..."
                 ;;
 
@@ -626,22 +792,24 @@ USEREOF
                 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
                 echo "1) Reiniciar proxies HTTP"
                 echo "2) Reiniciar OpenSSH"
-                echo "3) Reiniciar Dropbear"
-                echo "4) Reiniciar Stunnel"
-                echo "5) Reiniciar BadVPN UDPGW"
-                echo "6) Reiniciar Hysteria UDP"
-                echo "7) Reiniciar TODO"
+                echo "3) Reiniciar Dropbear :143 (2016.74)"
+                echo "4) Reiniciar Dropbear :142 (2019.78)"
+                echo "5) Reiniciar Stunnel"
+                echo "6) Reiniciar BadVPN UDPGW"
+                echo "7) Reiniciar Hysteria UDP"
+                echo "8) Reiniciar TODO"
                 echo "0) Volver"
                 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
                 read -p "Opción: " restart_opt
                 case $restart_opt in
                     1) restart_proxies; echo ""; read -p "ENTER..." ;;
                     2) systemctl restart ssh && echo "✓ OpenSSH reiniciado" || echo "✗ Error"; read -p "ENTER..." ;;
-                    3) systemctl restart dropbear-legacy && echo "✓ Dropbear reiniciado" || echo "✗ Error"; read -p "ENTER..." ;;
-                    4) stunnel_restart; read -p "ENTER..." ;;
-                    5) systemctl restart badvpn-udpgw && echo "✓ BadVPN reiniciado" || echo "✗ Error"; read -p "ENTER..." ;;
-                    6) systemctl restart hysteria 2>/dev/null && echo "✓ Hysteria reiniciado" || echo "✗ Hysteria no instalado"; read -p "ENTER..." ;;
-                    7) restart_all_services; echo ""; read -p "ENTER..." ;;
+                    3) systemctl restart dropbear-2016-74 msy-wrap-143 2>/dev/null && echo "✓ Dropbear :143 reiniciado" || echo "✗ Error"; read -p "ENTER..." ;;
+                    4) systemctl restart dropbear-2019-78 msy-wrap-142 2>/dev/null && echo "✓ Dropbear :142 reiniciado" || echo "✗ Error"; read -p "ENTER..." ;;
+                    5) stunnel_restart; read -p "ENTER..." ;;
+                    6) systemctl restart badvpn-udpgw && echo "✓ BadVPN reiniciado" || echo "✗ Error"; read -p "ENTER..." ;;
+                    7) systemctl restart hysteria 2>/dev/null && echo "✓ Hysteria reiniciado" || echo "✗ Hysteria no instalado"; read -p "ENTER..." ;;
+                    8) restart_all_services; echo ""; read -p "ENTER..." ;;
                 esac
                 ;;
 
@@ -659,72 +827,61 @@ USEREOF
                     echo ""
                     echo "Desinstalando MSY VPN..."
 
-                    # PASO 1: liberar puertos antes de detener servicios
-                    kill_all_ports
+                    kill_all_ports 2>/dev/null
 
-                    # PASO 2: detener y deshabilitar todo
                     echo "Deteniendo servicios..."
-                    for svc in dropbear-legacy badvpn-udpgw stunnel4 restore-proxies proxy-watchdog hysteria; do
+                    for svc in \
+                        dropbear-2016-74 dropbear-2019-78 \
+                        msy-wrap-143 msy-wrap-142 \
+                        badvpn-udpgw stunnel4 restore-proxies proxy-watchdog hysteria; do
                         systemctl stop    "$svc" 2>/dev/null
                         systemctl disable "$svc" 2>/dev/null
                     done
 
-                    # PASO 3: matar procesos residuales
                     echo "Eliminando procesos..."
-                    pkill -9 -x stunnel4            2>/dev/null
-                    pkill -9 -f "stunnel4 /etc"     2>/dev/null
-                    pkill -9 -f "proxy.py"          2>/dev/null
-                    pkill -9 -f "badvpn-udpgw"      2>/dev/null
-                    pkill -9 -f "watchdog.sh"        2>/dev/null
-                    pkill -9 -f "dropbear.*143"      2>/dev/null
+                    pkill -9 -x stunnel4        2>/dev/null
+                    pkill -9 -f "proxy.py"      2>/dev/null
+                    pkill -9 -f "badvpn-udpgw"  2>/dev/null
+                    pkill -9 -f "dropbear"       2>/dev/null
+                    pkill -9 -f "msy-wrap"       2>/dev/null
                     screen -ls 2>/dev/null | grep "proxy-" | awk '{print $1}' | \
                         xargs -I {} screen -X -S {} quit 2>/dev/null
 
-                    # PASO 4: segunda liberación de puertos
-                    for p in 22 80 143 443 444 777 7300 8080 8880 8888; do
+                    for p in 22 80 142 143 443 444 777 7300 8080 8880 8888; do
                         fuser -k "${p}/tcp" 2>/dev/null
                         fuser -k "${p}/udp" 2>/dev/null
                     done
 
-                    # Eliminar archivos systemd
                     echo "Eliminando archivos del sistema..."
-                    for svcf in dropbear-legacy badvpn-udpgw restore-proxies proxy-watchdog; do
+                    for svcf in dropbear-2016-74 dropbear-2019-78 msy-wrap-143 msy-wrap-142 \
+                                badvpn-udpgw restore-proxies proxy-watchdog; do
                         rm -f "/etc/systemd/system/${svcf}.service"
                     done
+                    rm -f /usr/local/bin/msy-wrap-*.sh
                     systemctl daemon-reload
 
-                    # Eliminar binarios compilados
-                    rm -rf /opt/dropbear-2016 /opt/dropbear-2019
+                    rm -rf /opt/dropbear-bins /opt/dropbear-2016 /opt/dropbear-2019
                     rm -f  /usr/bin/badvpn-udpgw
-
-                    # Eliminar configs y dirs del script
                     rm -rf /etc/dropbear-legacy /etc/proxy-python /etc/ssh-vpn /etc/hysteria 2>/dev/null
 
-                    # Stunnel: eliminar conf pero no el paquete
                     rm -f /etc/stunnel/stunnel.conf /etc/stunnel/stunnel.pem \
                           /etc/stunnel/stunnel.key  /etc/stunnel/stunnel.crt
-                    echo "ENABLED=0" > /etc/default/stunnel4
+                    echo "ENABLED=0" > /etc/default/stunnel4 2>/dev/null
 
-                    # Eliminar scripts del panel
                     rm -f /root/vpn-installer.sh /root/ssh-vpn-functions.sh \
                           /root/vpn-info.txt      /usr/local/bin/vpn-panel \
                           /usr/local/bin/vpn-manager /usr/local/bin/hysteria-manager 2>/dev/null
 
-                    # Eliminar menú automático del bashrc
                     sed -i '/MSY VPN/,/fi/d' /root/.bashrc 2>/dev/null
 
-                    # Eliminar fuentes descargadas
                     rm -rf /usr/src/dropbear-2016.74 /usr/src/dropbear-2019.78 \
                            /usr/src/badvpn 2>/dev/null
                     rm -f  /usr/src/dropbear-2016.74.tar.bz2 \
                            /usr/src/dropbear-2019.78.tar.bz2 2>/dev/null
-                    rm -f  /root/install_agnudp.sh /root/agnudp_manager.sh 2>/dev/null
 
-                    # Quitar Port 143 de sshd_config si se usó como fallback
-                    sed -i '/^Port 143/d' /etc/ssh/sshd_config 2>/dev/null
+                    sed -i '/^Port 14[23]/d' /etc/ssh/sshd_config 2>/dev/null
                     systemctl restart ssh 2>/dev/null
 
-                    # Swap (opcional)
                     echo ""
                     read -p "¿Eliminar también el Swap de 2GB? (s/n): " del_swap
                     if [[ $del_swap == "s" || $del_swap == "S" ]]; then
@@ -736,9 +893,8 @@ USEREOF
 
                     echo ""
                     echo -e "${GREEN}✓ Desinstalación completada${NC}"
-                    echo "  Servicios eliminados: Dropbear 2016/2019, BadVPN, Stunnel, Proxies, Watchdog"
+                    echo "  Eliminados: Dropbear 2016/2019, wrappers, BadVPN, Stunnel, Proxies"
                     echo "  OpenSSH se mantiene activo en puerto 22"
-                    echo "  Todos los puertos han sido liberados"
                     exit 0
                 else
                     echo "Desinstalación cancelada."
@@ -795,18 +951,19 @@ CYAN='\033[1;36m'; GREEN='\033[1;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 clear
 echo -e "
 ${CYAN}╔══════════════════════════════════════════════╗${NC}
-${CYAN}║${NC}  ${GREEN}✓ INSTALACIÓN COMPLETADA - v104${NC}          ${CYAN}║${NC}
+${CYAN}║${NC}  ${GREEN}✓ INSTALACIÓN COMPLETADA - v105${NC}          ${CYAN}║${NC}
 ${CYAN}╚══════════════════════════════════════════════╝${NC}
 
 ${YELLOW}IP (IPv4):${NC} ${CYAN}$IP${NC}
 
 ${GREEN}SERVICIOS:${NC}
-  ✓ OpenSSH:           puerto 22
-  ✓ Dropbear ${ACTIVE_DB_VER}:     puerto 143  (SSH-2.0-ByJuanitoProSniff)
-  ✓ Stunnel SSL/TLS:   443, 444, 777
-  ✓ Proxies Python:    80, 8080, 8880, 8888 → DB:143
-  ✓ BadVPN UDPGW:      UDP 7300
-  ✓ Hysteria UDP:      ver opción 8 del panel
+  ✓ OpenSSH:              puerto :22
+  ✓ Dropbear 2016.74:     puerto :143  ← PRINCIPAL
+  ✓ Dropbear 2019.78:     puerto :142  ← SECUNDARIO
+  ✓ Stunnel SSL/TLS:      :443, :444, :777
+  ✓ Proxies Python:       :80, :8080, :8880, :8888 → DB:143
+  ✓ BadVPN UDPGW:         UDP :7300
+  ✓ Hysteria UDP:         ver opción 8 del panel
 
 ${YELLOW}CREDENCIALES:${NC}
   Usuario:   $USER_VPN
@@ -818,17 +975,16 @@ ${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━�
 "
 
 cat > /root/vpn-info.txt <<INFOEOF
-MSY VPN SERVER v104
-
+MSY VPN SERVER v105
 IP: $IP
-Dropbear activo: $ACTIVE_DB_VER
 
 SERVICIOS:
-- OpenSSH: 22
-- Dropbear ${ACTIVE_DB_VER}: 143
-- Stunnel: 443→DB143 | 444→SSH22 | 777→DB143
-- Proxies Python: 80, 8080, 8880, 8888 → DB:143
-- BadVPN UDPGW: UDP 7300
+- OpenSSH:          :22
+- Dropbear 2016.74: :143  (principal)
+- Dropbear 2019.78: :142  (secundario)
+- Stunnel:          :443→DB143 | :444→SSH22 | :777→DB143
+- Proxies Python:   :80, :8080, :8880, :8888 → DB:143
+- BadVPN UDPGW:     UDP :7300
 
 USUARIO INICIAL:
 $USER_VPN / $PASS_VPN
