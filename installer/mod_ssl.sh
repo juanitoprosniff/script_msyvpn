@@ -149,15 +149,20 @@ rm -f /tmp/openssl-stunnel.cnf
 # ============================================================
 cat > /etc/stunnel/stunnel.conf <<'STUNNELCONF'
 ; MSY VPN - Stunnel SSL/TLS
-; Compatible Ubuntu 20.04 / 22.04 x86_64
+; Compatible Ubuntu 20.04 / 22.04 / 24.04 / 25.04 x86_64
+;
+; IMPORTANTE para Ubuntu 24/25 dual-stack (IPv4+IPv6):
+;   accept = 0.0.0.0:PUERTO  ← fuerza IPv4 explícitamente
+;   Sin el 0.0.0.0 stunnel puede intentar bind en IPv6 primero
+;   y fallar en sistemas donde IPv6 interfiere con IPv4.
 
 foreground = no
 pid        = /var/run/stunnel4/stunnel.pid
 
-; setuid/setgid omitidos intencionalmente:
-; causan fallo de arranque en Ubuntu 20/22 si el grupo
-; no fue creado correctamente por el postinst del paquete.
+; setuid/setgid OMITIDOS — causan fallo en Ubuntu 20-25 cuando
+; el grupo stunnel4 no fue creado por el postinst del paquete.
 
+; Sockets: optimización TCP para VPN
 socket = l:TCP_NODELAY=1
 socket = r:TCP_NODELAY=1
 socket = l:SO_KEEPALIVE=1
@@ -168,6 +173,8 @@ TIMEOUTidle    = 86400
 TIMEOUTbusy    = 300
 TIMEOUTconnect = 15
 
+; TLS: solo versiones modernas, compatible con HTTP Injector,
+; NapsternetV, v2rayNG y clientes similares
 sslVersion = all
 options    = NO_SSLv2
 options    = NO_SSLv3
@@ -214,7 +221,13 @@ stunnel_restart
 if pgrep -x stunnel4 >/dev/null 2>&1; then
     echo "✓ Stunnel activo en puertos 443, 444, 777"
 else
-    echo "⚠ Stunnel no inició — diagnóstico: stunnel4 /etc/stunnel/stunnel.conf"
+    echo "⚠ Stunnel no inició — mostrando error real:"
+    # Correr en foreground brevemente para capturar el error
+    timeout 3 /usr/bin/stunnel4 /etc/stunnel/stunnel.conf 2>&1 | head -20 || true
+    echo ""
+    echo "  Comandos de diagnóstico:"
+    echo "    stunnel4 /etc/stunnel/stunnel.conf"
+    echo "    journalctl -u stunnel4 --no-pager | tail -30"
 fi
 
 # ============================================================

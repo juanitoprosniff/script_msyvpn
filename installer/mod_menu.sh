@@ -18,7 +18,9 @@ source /root/ssh-vpn-functions.sh
 menu_principal() {
     while true; do
         clear
-        IP=$(curl -s --max-time 3 ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}')
+        IP=$(curl -4 -s --max-time 5 ifconfig.me 2>/dev/null \
+          || curl -4 -s --max-time 5 api4.ipify.org 2>/dev/null \
+          || hostname -I | tr ' ' '\n' | grep -v ':' | head -1)
 
         # Estados de puertos
         S_SSH=$(port_status 22 t)
@@ -502,7 +504,9 @@ restore_proxies
 # ====================
 # RESUMEN FINAL
 # ====================
-IP=$(curl -s --max-time 5 ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}')
+IP=$(curl -4 -s --max-time 5 ifconfig.me 2>/dev/null \
+  || curl -4 -s --max-time 5 api4.ipify.org 2>/dev/null \
+  || hostname -I | tr ' ' '\n' | grep -v ':' | head -1)
 
 # Recuperar credenciales del usuario inicial si no están en el entorno
 if [ -z "$USER_VPN" ]; then
