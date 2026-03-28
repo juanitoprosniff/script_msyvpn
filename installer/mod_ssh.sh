@@ -1,21 +1,18 @@
 #!/bin/bash
-# mod_ssh.sh - MSY VPN v104+ (FIXED v2)
-# SSH: OpenSSH :22 + Dropbear legacy :143
+# mod_ssh.sh - MSY VPN v104+ (BINARIOS PRECOMPILADOS)
 #
-# FIXES v2:
-#   - BUG PRINCIPAL: make -j$(nproc) causa race condition en libtomcrypt/libtommath
-#     dentro del source de Dropbear 2016. Con compilación paralela, los workers
-#     arrancan a compilar los .c antes de que los headers de la sublib estén listos
-#     → "tomcrypt.h: No such file or directory"
-#     SOLUCIÓN: compilar sublibs primero en -j1, luego el resto en paralelo.
+# Sin compilación — usa binarios precompilados en este orden:
+#   1. Dropbear del sistema (apt install dropbear-bin) — más confiable
+#   2. Binarios de tu GitHub si los tienes subidos
+#   3. Compilar 2019.78 como último recurso (tiene Makefile correcto)
 #
-#   - "Illegal packet size! (1231976033)" = 0x496E7421 = bytes "Int!"
-#     Son los primeros bytes de una petición HTTP llegando al puerto SSH.
-#     NO es bug de Dropbear/OpenSSH — es tráfico no-SSH en el puerto 143.
-#     SOLUCIÓN: wrapper socat que detecta protocolo antes de pasar al daemon.
+# Múltiples versiones en puertos distintos:
+#   Puerto :143 → Dropbear versión principal (más reciente disponible)
+#   Puerto :142 → Dropbear segunda versión
+#   Puerto :141 → Dropbear tercera versión
 #
-#   - CFLAGS correctos para GCC 7→14 (Ubuntu 18/20/22/24/25)
-#   - Fallback triple: 2016 → 2019 → OpenSSH
+# Wrapper socat en cada puerto público elimina "Illegal packet size"
+# (tráfico HTTP llegando al puerto SSH)
 
 # ============================================================
 # DETECCIÓN DE ENTORNO
@@ -25,20 +22,20 @@ OS_VER=$(lsb_release -rs 2>/dev/null \
     || echo "0")
 OS_MAJOR=$(echo "$OS_VER" | cut -d. -f1)
 ARCH=$(uname -m)
-GCC_VER=$(gcc -dumpversion 2>/dev/null | cut -d. -f1); GCC_VER=${GCC_VER:-0}
 
 echo "=========================================="
-echo " SSH/Dropbear Setup"
-echo " OS: Ubuntu $OS_VER | Arch: $ARCH | GCC: $GCC_VER"
+echo " SSH/Dropbear Setup (binarios precompilados)"
+echo " OS: Ubuntu $OS_VER | Arch: $ARCH"
 echo "=========================================="
 
 # ============================================================
-# DEPENDENCIAS
+# DEPENDENCIAS MÍNIMAS (sin compiladores)
 # ============================================================
 echo ""
-echo "Verificando dependencias..."
+echo "Instalando dependencias..."
+DEBIAN_FRONTEND=noninteractive apt-get update -qq 2>/dev/null
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-    gcc make wget libc6-dev libssl-dev socat 2>/dev/null
+    wget curl socat openssh-server 2>/dev/null
 echo "✓ Dependencias OK"
 
 # ============================================================
@@ -46,6 +43,9 @@ echo "✓ Dependencias OK"
 # ============================================================
 echo ""
 echo "Configurando OpenSSH en puerto 22..."
+
+# Limpiar puertos viejos del fallback si existían
+sed -i '/^Port 14[0-9]/d' /etc/ssh/sshd_config 2>/dev/null
 
 cat > /etc/ssh/banner.txt <<'EOF'
 ═══════════════════════════
@@ -80,259 +80,255 @@ EOF
 systemctl enable ssh >/dev/null 2>&1
 systemctl restart ssh
 systemctl is-active --quiet ssh \
-    && echo "✓ OpenSSH activo en 0.0.0.0:22 (solo IPv4)" \
+    && echo "✓ OpenSSH activo en 0.0.0.0:22" \
     || echo "✗ OpenSSH no inició"
 
 # ============================================================
-# CFLAGS POR VERSIÓN DE GCC
+# DIRECTORIOS
 # ============================================================
-if   [ "$GCC_VER" -ge 14 ] 2>/dev/null; then
-    COMPAT_CFLAGS="-w -fcommon -std=gnu11"
-    echo "  GCC $GCC_VER — CFLAGS máximos (GCC 14)"
-elif [ "$GCC_VER" -ge 12 ] 2>/dev/null; then
-    COMPAT_CFLAGS="-w -fcommon -Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=int-conversion -Wno-error=incompatible-pointer-types"
-    echo "  GCC $GCC_VER — CFLAGS GCC 12/13"
-else
-    COMPAT_CFLAGS="-w -fcommon"
-    echo "  GCC $GCC_VER — CFLAGS estándar"
-fi
+DB_DIR="/opt/dropbear-bins"
+DB_KEYS="/etc/dropbear-legacy"
+mkdir -p "$DB_DIR" "$DB_KEYS"
 
-# ============================================================
-# FUNCIÓN: compilar Dropbear
-#
-# FIX CRÍTICO — race condition en libtomcrypt/libtommath:
-#   Con -j$(nproc), make lanza todos los compiladores en paralelo.
-#   libtomcrypt genera headers internos (tomcrypt.h) durante su
-#   propio proceso de build. Si otro worker ya empezó a compilar
-#   los .c que necesitan ese header → "No such file or directory".
-#
-#   SOLUCIÓN en 3 pasos:
-#     1. make -j1 libtommath   → sin paralelismo (lib pequeña, rápida)
-#     2. make -j1 libtomcrypt  → sin paralelismo, necesita paso 1
-#     3. make -j$(nproc) resto → ahora sí en paralelo, las libs ya están
-# ============================================================
-compilar_dropbear() {
-    local VER=$1
-    local URL=$2
-    local PREFIX=$3
-    local TARBALL="dropbear-${VER}.tar.bz2"
-    local SRCDIR="/usr/src/dropbear-${VER}"
-    local SRVRBIN="${PREFIX}/sbin/dropbear"
-    local LOGFILE="/tmp/dropbear_build_${VER}.log"
-
-    echo ""
-    echo "  ── Compilando Dropbear $VER ──"
-    echo "  Prefix: $PREFIX"
-    > "$LOGFILE"
-
-    cd /usr/src
-
-    # ── Descargar ──
-    if [ ! -f "$TARBALL" ] || [ ! -s "$TARBALL" ]; then
-        echo "  Descargando $TARBALL..."
-        wget -q --timeout=60 -O "$TARBALL" "$URL" 2>/dev/null
-        if [ ! -s "$TARBALL" ]; then
-            echo "  Mirror 2..."
-            wget -q --timeout=60 -O "$TARBALL" \
-                "https://dropbear.nl/mirror/releases/$TARBALL" 2>/dev/null
-        fi
-        if [ ! -s "$TARBALL" ]; then
-            echo "  ✗ No se pudo descargar Dropbear $VER"
-            return 1
-        fi
-    fi
-
-    # ── Extraer (siempre limpio para evitar builds sucios) ──
-    rm -rf "$SRCDIR" 2>/dev/null
-    tar xjf "$TARBALL" -C /usr/src 2>/dev/null
-    if [ ! -d "$SRCDIR" ]; then
-        echo "  ✗ Error extrayendo $TARBALL"
-        return 1
-    fi
-
-    cd "$SRCDIR"
-
-    # ── Personalizar identificador SSH ──
-    for f in sysoptions.h default_options.h options.h; do
-        [ -f "$f" ] && grep -q "LOCAL_IDENT" "$f" && \
-            sed -i 's|#define LOCAL_IDENT.*|#define LOCAL_IDENT "SSH-2.0-ByJuanitoProSniff"|' "$f"
-    done
-    if grep -rq "IDENT_VERSION_PART" . 2>/dev/null; then
-        find . -name "*.h" | xargs grep -l "IDENT_VERSION_PART" 2>/dev/null | while read hf; do
-            sed -i 's|#define IDENT_VERSION_PART.*|#define IDENT_VERSION_PART "ByJuanitoProSniff"|' "$hf"
-        done
-    fi
-
-    # ── Configurar ──
-    export CFLAGS="$COMPAT_CFLAGS"
-    ./configure \
-        --prefix="$PREFIX" \
-        --disable-zlib \
-        --disable-wtmp \
-        --disable-lastlog \
-        >/dev/null 2>&1
-
-    # ── PASO 1: libtommath solo, sin paralelismo ──
-    echo "  [1/3] libtommath..."
-    if [ -d libtommath ]; then
-        if ! make -C libtommath -j1 CFLAGS="$COMPAT_CFLAGS" >> "$LOGFILE" 2>&1; then
-            echo "  ✗ libtommath falló — log: $LOGFILE"
-            tail -5 "$LOGFILE"
-            unset CFLAGS; cd /root; return 1
-        fi
-        echo "  ✓ libtommath OK"
-    fi
-
-    # ── PASO 2: libtomcrypt solo, sin paralelismo ──
-    echo "  [2/3] libtomcrypt..."
-    if [ -d libtomcrypt ]; then
-        if ! make -C libtomcrypt -j1 CFLAGS="$COMPAT_CFLAGS" >> "$LOGFILE" 2>&1; then
-            echo "  ✗ libtomcrypt falló — log: $LOGFILE"
-            tail -5 "$LOGFILE"
-            unset CFLAGS; cd /root; return 1
-        fi
-        echo "  ✓ libtomcrypt OK"
-    fi
-
-    # ── PASO 3: build principal, ahora en paralelo ──
-    echo "  [3/3] Compilando dropbear... (1-3 min)"
-    if ! make -j$(nproc) \
-            PROGRAMS="dropbear dropbearkey" \
-            CFLAGS="$COMPAT_CFLAGS" \
-            >> "$LOGFILE" 2>&1; then
-        echo "  ✗ make falló — últimas líneas:"
-        tail -10 "$LOGFILE"
-        unset CFLAGS; cd /root; return 1
-    fi
-
-    make install PROGRAMS="dropbear dropbearkey" >/dev/null 2>&1
-    unset CFLAGS
-
-    if [ ! -f "$SRVRBIN" ]; then
-        echo "  ✗ Binario no encontrado: $SRVRBIN"
-        cd /root; return 1
-    fi
-
-    echo "  ✓ Dropbear $VER compilado OK"
-    cd /root
-    return 0
-}
-
-# ============================================================
-# COMPILAR AMBAS VERSIONES
-# ============================================================
-echo ""
-echo "══════════════════════════════════════════"
-echo " Compilando Dropbear 2016.74..."
-echo "══════════════════════════════════════════"
-compilar_dropbear "2016.74" \
-    "https://matt.ucc.asn.au/dropbear/releases/dropbear-2016.74.tar.bz2" \
-    "/opt/dropbear-2016"
-DB2016_OK=0; [ -f /opt/dropbear-2016/sbin/dropbear ] && DB2016_OK=1
-
-echo ""
-echo "══════════════════════════════════════════"
-echo " Compilando Dropbear 2019.78..."
-echo "══════════════════════════════════════════"
-compilar_dropbear "2019.78" \
-    "https://matt.ucc.asn.au/dropbear/releases/dropbear-2019.78.tar.bz2" \
-    "/opt/dropbear-2019"
-DB2019_OK=0; [ -f /opt/dropbear-2019/sbin/dropbear ] && DB2019_OK=1
-
-echo ""
-echo "══════════════════════════════════════════"
-echo " Resultado compilaciones:"
-[ "$DB2016_OK" = "1" ] && echo "  ✓ Dropbear 2016.74" || echo "  ✗ Dropbear 2016.74 falló"
-[ "$DB2019_OK" = "1" ] && echo "  ✓ Dropbear 2019.78" || echo "  ✗ Dropbear 2019.78 falló"
-echo "══════════════════════════════════════════"
-
-# ============================================================
-# SELECCIONAR VERSIÓN ACTIVA
-# ============================================================
-ACTIVE_DB_BIN=""; ACTIVE_DB_VER=""; ACTIVE_DB_KEYBIN=""
-
-if [ "$DB2016_OK" = "1" ]; then
-    ACTIVE_DB_BIN="/opt/dropbear-2016/sbin/dropbear"
-    ACTIVE_DB_KEYBIN="/opt/dropbear-2016/bin/dropbearkey"
-    ACTIVE_DB_VER="2016"
-elif [ "$DB2019_OK" = "1" ]; then
-    ACTIVE_DB_BIN="/opt/dropbear-2019/sbin/dropbear"
-    ACTIVE_DB_KEYBIN="/opt/dropbear-2019/bin/dropbearkey"
-    ACTIVE_DB_VER="2019"
-fi
-
-# ============================================================
-# GENERAR LLAVES
-# ============================================================
-mkdir -p /etc/dropbear-legacy
-cat > /etc/dropbear-legacy/banner.txt <<'BANEOF'
+cat > "$DB_KEYS/banner.txt" <<'BANEOF'
 t.me/FREEINTERNETVPNMSY
 BANEOF
 
-if [ -n "$ACTIVE_DB_KEYBIN" ]; then
-    echo "Generando llaves Dropbear..."
-    [ ! -f /etc/dropbear-legacy/dropbear_rsa_host_key ] && \
-        "$ACTIVE_DB_KEYBIN" -t rsa -f /etc/dropbear-legacy/dropbear_rsa_host_key -s 2048 >/dev/null 2>&1 \
-        && echo "  ✓ Llave RSA generada"
-    [ ! -f /etc/dropbear-legacy/dropbear_ecdsa_host_key ] && \
-        "$ACTIVE_DB_KEYBIN" -t ecdsa -f /etc/dropbear-legacy/dropbear_ecdsa_host_key >/dev/null 2>&1 \
-        && echo "  ✓ Llave ECDSA generada"
+# ============================================================
+# MÉTODO 1: apt install dropbear-bin
+# Es el más confiable — binario oficial del sistema, siempre
+# compatible con el Ubuntu instalado, sin compilar nada.
+# ============================================================
+echo ""
+echo "══════════════════════════════════════════"
+echo " Método 1: Dropbear via apt..."
+echo "══════════════════════════════════════════"
+
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq dropbear-bin 2>/dev/null \
+    || DEBIAN_FRONTEND=noninteractive apt-get install -y -qq dropbear 2>/dev/null
+
+APT_DB_BIN=$(command -v dropbear 2>/dev/null \
+    || ls /usr/sbin/dropbear 2>/dev/null \
+    || ls /usr/bin/dropbear  2>/dev/null \
+    || echo "")
+APT_DB_KEY=$(command -v dropbearkey 2>/dev/null \
+    || ls /usr/bin/dropbearkey  2>/dev/null \
+    || ls /usr/sbin/dropbearkey 2>/dev/null \
+    || echo "")
+
+if [ -n "$APT_DB_BIN" ] && [ -x "$APT_DB_BIN" ]; then
+    # Obtener versión
+    APT_DB_VER=$("$APT_DB_BIN" -V 2>&1 | grep -oP '\d{4}\.\d+' | head -1)
+    APT_DB_VER=${APT_DB_VER:-"apt"}
+    echo "  ✓ Dropbear apt: v$APT_DB_VER → $APT_DB_BIN"
+
+    # Copiar al directorio del script para manejarlo nosotros
+    cp "$APT_DB_BIN" "$DB_DIR/dropbear-${APT_DB_VER}"
+    chmod +x "$DB_DIR/dropbear-${APT_DB_VER}"
+    [ -n "$APT_DB_KEY" ] && [ -x "$APT_DB_KEY" ] && \
+        cp "$APT_DB_KEY" "$DB_DIR/dropbearkey-${APT_DB_VER}"
+
+    # Detener el servicio oficial de apt (lo manejamos nosotros)
+    systemctl stop    dropbear 2>/dev/null
+    systemctl disable dropbear 2>/dev/null
+else
+    echo "  ✗ Dropbear no disponible via apt"
+    APT_DB_VER=""
 fi
+
+# ============================================================
+# MÉTODO 2: binarios desde tu GitHub
+# Sube los binarios compilados una vez y el script los descarga.
+# Estructura sugerida en tu repo:
+#   installer/bins/dropbear-2016-amd64
+#   installer/bins/dropbear-2016-arm64
+#   installer/bins/dropbearkey-2016-amd64
+# ============================================================
+echo ""
+echo "══════════════════════════════════════════"
+echo " Método 2: Binarios desde GitHub..."
+echo "══════════════════════════════════════════"
+
+GITHUB_BASE="https://raw.githubusercontent.com/juanitoprosniff/script_msyvpn/main/installer"
+
+# Detectar arquitectura para el binario correcto
+case "$ARCH" in
+    x86_64)  ARCH_SUFFIX="amd64" ;;
+    aarch64) ARCH_SUFFIX="arm64" ;;
+    armv7l)  ARCH_SUFFIX="armhf" ;;
+    *)       ARCH_SUFFIX="amd64" ;;
+esac
+
+# Intentar descargar binarios precompilados del GitHub
+# (si los has subido en esa estructura)
+_descargar_bin_github() {
+    local NOMBRE=$1   # ej: dropbear-2016
+    local DEST=$2     # destino completo
+    local URL="${GITHUB_BASE}/bins/${NOMBRE}-${ARCH_SUFFIX}"
+
+    wget -q --timeout=20 -O "${DEST}.tmp" "$URL" 2>/dev/null
+    if [ -s "${DEST}.tmp" ] && file "${DEST}.tmp" 2>/dev/null | grep -q "ELF"; then
+        mv "${DEST}.tmp" "$DEST"
+        chmod +x "$DEST"
+        echo "  ✓ Descargado: $NOMBRE ($ARCH_SUFFIX)"
+        return 0
+    fi
+    rm -f "${DEST}.tmp"
+    return 1
+}
+
+for VER_CORTA in "2016" "2019"; do
+    DEST="$DB_DIR/dropbear-${VER_CORTA}.74"
+    [ "$VER_CORTA" = "2019" ] && DEST="$DB_DIR/dropbear-${VER_CORTA}.78"
+    [ -x "$DEST" ] && continue   # ya lo tenemos
+    _descargar_bin_github "dropbear-${VER_CORTA}" "$DEST" || true
+    _descargar_bin_github "dropbearkey-${VER_CORTA}" "${DEST/dropbear/dropbearkey}" || true
+done
+
+# ============================================================
+# MÉTODO 3: compilar 2019.78 si aún no tenemos nada
+#
+# 2019.78 tiene el Makefile corregido vs 2016 —  el race condition
+# de libtomcrypt no existe en 2019. Aun así compilamos las sublibs
+# primero en -j1 por seguridad.
+# ============================================================
+DB_COUNT=$(ls "$DB_DIR"/dropbear-* 2>/dev/null | grep -vc "key" || echo 0)
+
+if [ "$DB_COUNT" = "0" ]; then
+    echo ""
+    echo "══════════════════════════════════════════"
+    echo " Método 3: Compilando Dropbear 2019.78..."
+    echo " (2019 tiene Makefile estable, sin race condition)"
+    echo "══════════════════════════════════════════"
+
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+        gcc make libc6-dev libssl-dev 2>/dev/null
+
+    GCC_VER=$(gcc -dumpversion 2>/dev/null | cut -d. -f1); GCC_VER=${GCC_VER:-0}
+    if   [ "$GCC_VER" -ge 14 ] 2>/dev/null; then CF="-w -fcommon -std=gnu11"
+    elif [ "$GCC_VER" -ge 12 ] 2>/dev/null; then CF="-w -fcommon"
+    else                                          CF="-w -fcommon"; fi
+
+    cd /usr/src
+    TB="dropbear-2019.78.tar.bz2"
+    wget -q --timeout=90 -O "$TB" \
+        "https://matt.ucc.asn.au/dropbear/releases/$TB" 2>/dev/null \
+    || wget -q --timeout=90 -O "$TB" \
+        "https://dropbear.nl/mirror/releases/$TB" 2>/dev/null
+
+    if [ -s "$TB" ]; then
+        rm -rf dropbear-2019.78
+        tar xjf "$TB"
+        cd dropbear-2019.78
+
+        # Personalizar banner SSH
+        for f in sysoptions.h default_options.h options.h; do
+            [ -f "$f" ] && grep -q "LOCAL_IDENT" "$f" && \
+                sed -i 's|#define LOCAL_IDENT.*|#define LOCAL_IDENT "SSH-2.0-ByJuanitoProSniff"|' "$f"
+        done
+
+        export CFLAGS="$CF"
+        ./configure --prefix="/opt/db-build" \
+            --disable-zlib --disable-wtmp --disable-lastlog >/dev/null 2>&1
+
+        # Sublibs primero en -j1 (previene cualquier race condition)
+        echo "  Compilando sublibs..."
+        [ -d libtommath ]  && make -C libtommath  -j1 CFLAGS="$CF" >/dev/null 2>&1
+        [ -d libtomcrypt ] && make -C libtomcrypt -j1 CFLAGS="$CF" >/dev/null 2>&1
+
+        echo "  Compilando dropbear..."
+        make -j$(nproc) PROGRAMS="dropbear dropbearkey" CFLAGS="$CF" >/dev/null 2>&1
+        make install PROGRAMS="dropbear dropbearkey" >/dev/null 2>&1
+        unset CFLAGS
+
+        if [ -x /opt/db-build/sbin/dropbear ]; then
+            cp /opt/db-build/sbin/dropbear   "$DB_DIR/dropbear-2019.78"
+            cp /opt/db-build/bin/dropbearkey "$DB_DIR/dropbearkey-2019.78" 2>/dev/null
+            chmod +x "$DB_DIR/dropbear-2019.78"
+            echo "  ✓ Dropbear 2019.78 compilado y listo"
+        else
+            echo "  ✗ Compilación falló"
+        fi
+        cd /root
+    else
+        echo "  ✗ No se pudo descargar el tarball de 2019"
+    fi
+fi
+
+# ============================================================
+# GENERAR LLAVES HOST
+# ============================================================
+_gen_llaves() {
+    local KEYBIN=""
+    for v in "$APT_DB_VER" "2019.78" "2016.74" "apt"; do
+        [ -z "$v" ] && continue
+        [ -x "$DB_DIR/dropbearkey-${v}" ] && KEYBIN="$DB_DIR/dropbearkey-${v}" && break
+    done
+    [ -z "$KEYBIN" ] && command -v dropbearkey >/dev/null 2>&1 && KEYBIN="dropbearkey"
+    [ -z "$KEYBIN" ] && return
+
+    echo "Generando llaves host..."
+    [ ! -f "$DB_KEYS/dropbear_rsa_host_key" ] && \
+        "$KEYBIN" -t rsa -f "$DB_KEYS/dropbear_rsa_host_key" -s 2048 >/dev/null 2>&1 \
+        && echo "  ✓ RSA"
+    [ ! -f "$DB_KEYS/dropbear_ecdsa_host_key" ] && \
+        "$KEYBIN" -t ecdsa -f "$DB_KEYS/dropbear_ecdsa_host_key" >/dev/null 2>&1 \
+        && echo "  ✓ ECDSA"
+}
+_gen_llaves
+
+# ============================================================
+# RESUMEN DE BINARIOS
+# ============================================================
+echo ""
+echo "══════════════════════════════════════════"
+echo " Binarios disponibles:"
+LISTA_VERS=()
+for bin in "$DB_DIR"/dropbear-*; do
+    [[ "$bin" == *"key"* ]] && continue
+    [ -x "$bin" ] || continue
+    VER="${bin##*dropbear-}"
+    LISTA_VERS+=("$VER")
+    echo "  ✓ Dropbear $VER"
+done
+[ "${#LISTA_VERS[@]}" = "0" ] && echo "  ✗ Ningún binario disponible"
+echo "══════════════════════════════════════════"
 
 # ============================================================
 # WRAPPER ANTI "Illegal packet size"
 #
-# El error 1231976033 = 0x496E7421 = ASCII "Int!" son los primeros
-# 4 bytes de tráfico HTTP llegando al puerto SSH. Dropbear/OpenSSH
-# lo reportan y cierran la conexión. Solución: un wrapper en el
-# puerto público 143 que detecta si viene SSH o HTTP:
-#
-#   Puerto público  :143  ← socat wrapper (detecta protocolo)
-#   Puerto interno  :1143 ← Dropbear real (solo recibe SSH limpio)
-#
-# El wrapper lee la primera línea del cliente:
-#   "SSH-*"     → es conexión SSH real  → reenviar a :1143
-#   "CONNECT *" → es proxy HTTP CONNECT → responder 200 y tunelizar
-#   otro        → tráfico basura        → cerrar limpiamente
+# 1231976033 = 0x496E7421 = "Int!" = primeros bytes de HTTP
+# El wrapper lee la primera línea y decide:
+#   SSH-*     → conexión SSH real  → reenviar a Dropbear interno
+#   CONNECT * → proxy HTTP CONNECT → responder 200 y tunelizar
+#   vacío     → cliente TCP directo → pasar sin filtrar
+#   otro      → tráfico basura     → cerrar limpiamente
 # ============================================================
-instalar_wrapper_143() {
-    echo ""
-    echo "Instalando wrapper de protocolo en :143..."
+_crear_wrapper() {
+    local PPUB=$1    # puerto público (cliente)
+    local PINT=$2    # puerto interno (dropbear)
+    local WS="/usr/local/bin/msy-wrap-${PPUB}.sh"
+    local SVC="msy-wrap-${PPUB}"
 
-    cat > /usr/local/bin/msy-ssh-wrapper.sh <<'WRAPPER'
+    cat > "$WS" <<WRAP
 #!/bin/bash
-# Wrapper MSY VPN - detección de protocolo en puerto 143
-# Dropbear escucha en 127.0.0.1:1143 (solo recibe SSH limpio)
-
-read -t 10 -r PRIMERA_LINEA
-
-if [[ "$PRIMERA_LINEA" == SSH-* ]]; then
-    # Conexión SSH legítima: pasar a Dropbear con la línea que ya leímos
-    { printf '%s\r\n' "$PRIMERA_LINEA"; cat; } | socat - TCP:127.0.0.1:1143
-elif [[ "$PRIMERA_LINEA" == CONNECT\ * ]]; then
-    # Proxy HTTP CONNECT: responder 200 y tunelizar
-    printf 'HTTP/1.0 200 Connection established\r\n\r\n'
-    socat - TCP:127.0.0.1:1143
-elif [[ -z "$PRIMERA_LINEA" ]]; then
-    # Sin datos (timeout o conexión vacía): pasar directo
-    socat - TCP:127.0.0.1:1143
-else
-    # Tráfico no-SSH (GET, POST, escáneres, etc): cerrar limpiamente
-    printf 'HTTP/1.0 400 Bad Request\r\nContent-Length: 0\r\n\r\n'
+read -t 10 -r L
+if   [[ "\$L" == SSH-* ]];      then { printf '%s\r\n' "\$L"; cat; } | socat - TCP:127.0.0.1:${PINT}
+elif [[ "\$L" == CONNECT\ * ]]; then printf 'HTTP/1.0 200 Connection established\r\n\r\n'; socat - TCP:127.0.0.1:${PINT}
+elif [[ -z "\$L" ]];            then socat - TCP:127.0.0.1:${PINT}
+else                                 printf 'HTTP/1.0 400 Bad Request\r\nContent-Length: 0\r\n\r\n'
 fi
-WRAPPER
-    chmod +x /usr/local/bin/msy-ssh-wrapper.sh
+WRAP
+    chmod +x "$WS"
 
-    cat > /etc/systemd/system/msy-ssh-wrapper.service <<'WSVC'
+    cat > "/etc/systemd/system/${SVC}.service" <<WSVC
 [Unit]
-Description=MSY SSH Protocol Wrapper :143
-After=network.target dropbear-legacy.service
+Description=MSY Wrapper :${PPUB}→:${PINT}
+After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/socat \
-    TCP-LISTEN:143,reuseaddr,fork,backlog=128 \
-    EXEC:/usr/local/bin/msy-ssh-wrapper.sh
+ExecStart=/usr/bin/socat TCP-LISTEN:${PPUB},reuseaddr,fork,backlog=256 EXEC:${WS}
 Restart=always
 RestartSec=3
 LimitNOFILE=65536
@@ -340,39 +336,44 @@ LimitNOFILE=65536
 [Install]
 WantedBy=multi-user.target
 WSVC
-
     systemctl daemon-reload
-    systemctl enable msy-ssh-wrapper >/dev/null 2>&1
-    echo "  ✓ Wrapper instalado"
+    systemctl enable "$SVC" >/dev/null 2>&1
 }
 
 # ============================================================
-# FUNCIÓN: generar servicio systemd para Dropbear
-# Puerto por defecto: 1143 (interno, el wrapper expone :143)
+# FUNCIÓN: iniciar un Dropbear en su puerto
 # ============================================================
-generar_servicio_dropbear() {
-    local BIN=$1
-    local VER=$2
-    local PUERTO=${3:-1143}
-    local BIND=${4:-127.0.0.1}   # interno=127.0.0.1, directo=0.0.0.0
+_arrancar_db() {
+    local VER=$1
+    local PPUB=$2    # puerto público
+    local PINT=$3    # puerto interno (dropbear escucha aquí)
+    local BIN="$DB_DIR/dropbear-${VER}"
+    local SVC="dropbear-${VER/./-}"
+    local WR_SVC="msy-wrap-${PPUB}"
 
-    local KEY_FLAGS=""
-    [ -f /etc/dropbear-legacy/dropbear_rsa_host_key ]   && KEY_FLAGS="$KEY_FLAGS -r /etc/dropbear-legacy/dropbear_rsa_host_key"
-    [ -f /etc/dropbear-legacy/dropbear_ecdsa_host_key ] && KEY_FLAGS="$KEY_FLAGS -r /etc/dropbear-legacy/dropbear_ecdsa_host_key"
+    [ ! -x "$BIN" ] && return 1
 
-    cat > /etc/systemd/system/dropbear-legacy.service <<DBSVC
+    local KF=""
+    [ -f "$DB_KEYS/dropbear_rsa_host_key" ]   && KF="$KF -r $DB_KEYS/dropbear_rsa_host_key"
+    [ -f "$DB_KEYS/dropbear_ecdsa_host_key" ] && KF="$KF -r $DB_KEYS/dropbear_ecdsa_host_key"
+
+    # Liberar puertos
+    systemctl stop "$WR_SVC" "$SVC" 2>/dev/null
+    pkill -9 -f "dropbear.*${PINT}" 2>/dev/null
+    pkill -9 -f "socat.*${PPUB}"    2>/dev/null
+    fuser -k "${PPUB}/tcp" 2>/dev/null
+    fuser -k "${PINT}/tcp" 2>/dev/null
+    sleep 1
+
+    # Servicio Dropbear (loopback interno)
+    cat > "/etc/systemd/system/${SVC}.service" <<DBSVC
 [Unit]
-Description=Dropbear SSH $VER - Puerto $PUERTO (MSY VPN)
+Description=Dropbear $VER :${PINT} interno (MSY VPN)
 After=network.target
-Wants=network.target
 
 [Service]
 Type=simple
-ExecStart=${BIN} -F -E \\
-    -p ${BIND}:${PUERTO} \\
-    ${KEY_FLAGS} \\
-    -b /etc/dropbear-legacy/banner.txt \\
-    -K 120 -I 600
+ExecStart=${BIN} -F -E -p 127.0.0.1:${PINT} ${KF} -b ${DB_KEYS}/banner.txt -K 120 -I 600
 Restart=always
 RestartSec=3
 KillMode=process
@@ -383,90 +384,71 @@ LimitNOFILE=65536
 [Install]
 WantedBy=multi-user.target
 DBSVC
-
     systemctl daemon-reload
-    systemctl enable dropbear-legacy >/dev/null 2>&1
-}
-
-# ============================================================
-# ARRANCAR DROPBEAR + WRAPPER
-# ============================================================
-_liberar_puertos() {
-    systemctl stop msy-ssh-wrapper  2>/dev/null
-    systemctl stop dropbear-legacy  2>/dev/null
-    pkill -9 -f "dropbear.*143"     2>/dev/null
-    pkill -9 -f "socat.*143"        2>/dev/null
-    fuser -k 143/tcp  2>/dev/null
-    fuser -k 1143/tcp 2>/dev/null
-    sleep 1
-}
-
-if [ -n "$ACTIVE_DB_BIN" ]; then
-    echo ""
-    echo "Activando Dropbear $ACTIVE_DB_VER + wrapper en :143..."
-    _liberar_puertos
-
-    # Dropbear en puerto interno 1143 (solo loopback)
-    generar_servicio_dropbear "$ACTIVE_DB_BIN" "$ACTIVE_DB_VER" "1143" "127.0.0.1"
-    systemctl restart dropbear-legacy
+    systemctl enable "$SVC" >/dev/null 2>&1
+    systemctl restart "$SVC"
     sleep 1
 
-    if systemctl is-active --quiet dropbear-legacy; then
-        echo "✓ Dropbear $ACTIVE_DB_VER activo en 127.0.0.1:1143"
-
-        # Wrapper en :143
-        instalar_wrapper_143
-        systemctl restart msy-ssh-wrapper
+    if systemctl is-active --quiet "$SVC"; then
+        # Wrapper en puerto público
+        _crear_wrapper "$PPUB" "$PINT"
+        systemctl restart "$WR_SVC"
         sleep 1
 
-        if systemctl is-active --quiet msy-ssh-wrapper; then
-            echo "✓ Wrapper activo en 0.0.0.0:143"
-            echo "  → cliente:143 → wrapper → Dropbear:1143 (sin Illegal packet size)"
+        if systemctl is-active --quiet "$WR_SVC"; then
+            echo "  ✓ Dropbear $VER  :${PPUB} → :${PINT} (wrapper activo)"
         else
-            # socat no disponible o fallo: Dropbear directo en :143
-            echo "⚠ Wrapper falló (socat?). Dropbear directo en :143..."
-            _liberar_puertos
-            generar_servicio_dropbear "$ACTIVE_DB_BIN" "$ACTIVE_DB_VER" "143" "0.0.0.0"
-            systemctl restart dropbear-legacy
-            sleep 2
-            systemctl is-active --quiet dropbear-legacy \
-                && echo "✓ Dropbear $ACTIVE_DB_VER activo en 0.0.0.0:143 (directo)" \
-                || echo "✗ Dropbear no inició"
+            # Sin socat: Dropbear directo en puerto público
+            systemctl stop "$SVC" 2>/dev/null
+            fuser -k "${PPUB}/tcp" 2>/dev/null
+            sed -i "s|127.0.0.1:${PINT}|0.0.0.0:${PPUB}|" "/etc/systemd/system/${SVC}.service"
+            systemctl daemon-reload
+            systemctl restart "$SVC"
+            sleep 1
+            systemctl is-active --quiet "$SVC" \
+                && echo "  ✓ Dropbear $VER  :${PPUB} (directo, sin wrapper)" \
+                || { echo "  ✗ Dropbear $VER falló"; return 1; }
         fi
-
+        return 0
     else
-        echo "⚠ Dropbear $ACTIVE_DB_VER no inició:"
-        journalctl -u dropbear-legacy --no-pager -n 8 2>/dev/null
-
-        # Probar versión alternativa
-        if [ "$ACTIVE_DB_VER" = "2016" ] && [ "$DB2019_OK" = "1" ]; then
-            echo "  Intentando Dropbear 2019..."
-            fuser -k 1143/tcp 2>/dev/null
-            generar_servicio_dropbear "/opt/dropbear-2019/sbin/dropbear" "2019" "1143" "127.0.0.1"
-            systemctl restart dropbear-legacy; sleep 2
-            if systemctl is-active --quiet dropbear-legacy; then
-                echo "✓ Dropbear 2019 activo"
-                ACTIVE_DB_VER="2019"; ACTIVE_DB_BIN="/opt/dropbear-2019/sbin/dropbear"
-                instalar_wrapper_143
-                systemctl restart msy-ssh-wrapper
-            fi
-        fi
-
-        # Fallback final: OpenSSH en :143
-        if ! systemctl is-active --quiet dropbear-legacy; then
-            echo "⚠ Fallback: OpenSSH en :143"
-            fuser -k 143/tcp 2>/dev/null
-            grep -q "^Port 143" /etc/ssh/sshd_config || \
-                sed -i '/^Port 22/a Port 143' /etc/ssh/sshd_config
-            systemctl restart ssh
-            ACTIVE_DB_VER="ssh_fallback"
-        fi
+        echo "  ✗ Dropbear $VER no inició"
+        journalctl -u "$SVC" --no-pager -n 5 2>/dev/null
+        return 1
     fi
+}
 
-else
-    # Ningún Dropbear compiló
-    echo "⚠ Sin Dropbear — OpenSSH fallback en :143"
-    _liberar_puertos
+# ============================================================
+# ARRANCAR TODAS LAS VERSIONES EN SUS PUERTOS
+# Puerto 143 = principal, 142 = secundario, 141 = tercero
+# ============================================================
+echo ""
+echo "Iniciando servicios Dropbear..."
+
+PPUBS=(143  142  141)
+PINTS=(1143 1142 1141)
+
+ACTIVE_DB_VER=""
+ACTIVE_DB_BIN=""
+DB_ACTIVOS=()
+
+for i in "${!LISTA_VERS[@]}"; do
+    [ "$i" -ge "${#PPUBS[@]}" ] && break
+    VER="${LISTA_VERS[$i]}"
+    PPUB="${PPUBS[$i]}"
+    PINT="${PINTS[$i]}"
+
+    if _arrancar_db "$VER" "$PPUB" "$PINT"; then
+        DB_ACTIVOS+=("$VER:$PPUB")
+        [ -z "$ACTIVE_DB_VER" ] && \
+            ACTIVE_DB_VER="$VER" && \
+            ACTIVE_DB_BIN="$DB_DIR/dropbear-${VER}"
+    fi
+done
+
+# Fallback OpenSSH en :143
+if [ -z "$ACTIVE_DB_VER" ]; then
+    echo "⚠ Ningún Dropbear disponible — OpenSSH fallback en :143"
+    fuser -k 143/tcp 2>/dev/null
     grep -q "^Port 143" /etc/ssh/sshd_config || \
         sed -i '/^Port 22/a Port 143' /etc/ssh/sshd_config
     systemctl restart ssh
@@ -476,10 +458,23 @@ fi
 # ============================================================
 # GUARDAR ESTADO
 # ============================================================
-echo "$ACTIVE_DB_VER"  > /etc/dropbear-legacy/active_version.txt
-echo "$ACTIVE_DB_BIN"  > /etc/dropbear-legacy/active_bin.txt
-echo "$DB2016_OK"      > /etc/dropbear-legacy/has_2016.txt
-echo "$DB2019_OK"      > /etc/dropbear-legacy/has_2019.txt
+echo "$ACTIVE_DB_VER"              > /etc/dropbear-legacy/active_version.txt
+echo "$ACTIVE_DB_BIN"              > /etc/dropbear-legacy/active_bin.txt
+printf '%s\n' "${LISTA_VERS[@]}"   > /etc/dropbear-legacy/all_versions.txt
+printf '%s\n' "${DB_ACTIVOS[@]}"   > /etc/dropbear-legacy/active_ports.txt
+[ -x "$DB_DIR/dropbear-2016.74" ] && echo "1" || echo "0" > /etc/dropbear-legacy/has_2016.txt
+[ -x "$DB_DIR/dropbear-2019.78" ] && echo "1" || echo "0" > /etc/dropbear-legacy/has_2019.txt
+
+echo ""
+echo "══════════════════════════════════════════"
+echo " Resumen final:"
+for info in "${DB_ACTIVOS[@]}"; do
+    VER="${info%%:*}"; P="${info##*:}"
+    echo "  ✓ Dropbear $VER → puerto :$P"
+done
+[ "${#DB_ACTIVOS[@]}" = "0" ] && echo "  ⚠ Fallback: OpenSSH en :143"
+echo " Principal: $ACTIVE_DB_VER"
+echo "══════════════════════════════════════════"
 
 # ============================================================
 # USUARIO INICIAL VPN
@@ -494,7 +489,7 @@ useradd -m -s /bin/bash "$USER_VPN"
 echo "$USER_VPN:$PASS_VPN" | chpasswd
 
 mkdir -p /etc/ssh-vpn/users
-cat > /etc/ssh-vpn/users/$USER_VPN.txt <<USEREOF
+cat > "/etc/ssh-vpn/users/${USER_VPN}.txt" <<USEREOF
 Usuario: $USER_VPN
 Contraseña: $PASS_VPN
 Fecha creación: $(date +%Y-%m-%d)
