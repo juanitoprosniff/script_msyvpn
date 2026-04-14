@@ -1,7 +1,11 @@
 #!/bin/bash
-# mod_menu.sh - MSY VPN v105
-# Panel principal: muestra Dropbear 2016.74 (:143) y 2019.78 (:142)
-# Opción 7: Gestión Dropbear — cambiar versión por puerto, recompilar
+# mod_menu.sh - MSY VPN v106
+# Panel principal con soporte completo:
+#   - SSH Payload SNI (nuevo submenu en opción 5)
+#   - SSL Remote Proxy (nuevo submenu en opción 5)
+#   - Estado mejorado mostrando SNI proxies y SSL Remote
+#   - restart_all_services incluye SNI proxies y SSL Remote
+#   - Desinstalación limpia de todos los servicios nuevos
 
 cat > /root/vpn-installer.sh << 'MAINSCRIPT'
 #!/bin/bash
@@ -25,7 +29,6 @@ _db_has_2016()    { cat "$DB_KEYS/has_2016.txt"       2>/dev/null || echo "0"; }
 _db_has_2019()    { cat "$DB_KEYS/has_2019.txt"       2>/dev/null || echo "0"; }
 
 _db_port_status() {
-    # $1 = versión ("2016.74" o "2019.78"), $2 = puerto público
     local SVC="dropbear-${1//./-}"
     local WR="msy-wrap-${2}"
     if systemctl is-active --quiet "$SVC" 2>/dev/null \
@@ -38,11 +41,7 @@ _db_port_status() {
 }
 
 # ============================================================
-# FUNCIÓN: cambiar la versión de Dropbear en un puerto dado
-#
-# $1 = versión destino ("2016.74" / "2019.78" / "ssh_fallback")
-# $2 = puerto público (143 o 142)
-# $3 = puerto interno (1143 o 1142)
+# FUNCIÓN: cambiar la versión de Dropbear en un puerto
 # ============================================================
 _cambiar_dropbear_puerto() {
     local VER="$1"
@@ -52,8 +51,6 @@ _cambiar_dropbear_puerto() {
     local SVC="dropbear-${VER//./-}"
     local WR_SVC="msy-wrap-${PPUB}"
 
-    # Detener cualquier cosa corriendo en ese puerto
-    # Buscar qué servicio ocupa el puerto ahora y detenerlo
     for old_svc in dropbear-2016-74 dropbear-2019-78 msy-wrap-${PPUB}; do
         systemctl stop "$old_svc" 2>/dev/null
     done
@@ -64,7 +61,6 @@ _cambiar_dropbear_puerto() {
     sleep 1
 
     if [ "$VER" = "ssh_fallback" ]; then
-        # Quitar Dropbear del puerto y poner OpenSSH
         fuser -k "${PPUB}/tcp" 2>/dev/null
         if ! grep -q "^Port ${PPUB}" /etc/ssh/sshd_config; then
             sed -i "/^Port 22/a Port ${PPUB}" /etc/ssh/sshd_config
@@ -84,7 +80,6 @@ _cambiar_dropbear_puerto() {
         return 1
     fi
 
-    # Si el puerto tenía OpenSSH, quitarlo de sshd_config
     if grep -q "^Port ${PPUB}" /etc/ssh/sshd_config 2>/dev/null; then
         sed -i "/^Port ${PPUB}/d" /etc/ssh/sshd_config
         systemctl restart ssh 2>/dev/null
@@ -94,7 +89,6 @@ _cambiar_dropbear_puerto() {
     [ -f "$DB_KEYS/dropbear_rsa_host_key" ]   && KF="$KF -r $DB_KEYS/dropbear_rsa_host_key"
     [ -f "$DB_KEYS/dropbear_ecdsa_host_key" ] && KF="$KF -r $DB_KEYS/dropbear_ecdsa_host_key"
 
-    # Crear/actualizar wrapper
     local WS="/usr/local/bin/msy-wrap-${PPUB}.sh"
     cat > "$WS" <<WRAP
 #!/bin/bash
@@ -153,7 +147,6 @@ WRSVC
         if systemctl is-active --quiet "$WR_SVC"; then
             echo "✓ Dropbear $VER activo en :${PPUB} (con wrapper)"
         else
-            # Directo sin wrapper
             systemctl stop "$SVC" 2>/dev/null
             fuser -k "${PPUB}/tcp" 2>/dev/null
             sed -i "s|127.0.0.1:${PINT}|0.0.0.0:${PPUB}|g" "/etc/systemd/system/${SVC}.service"
@@ -174,11 +167,10 @@ WRSVC
 }
 
 # ============================================================
-# FUNCIÓN: RECOMPILAR DROPBEAR DESDE FUENTE
-# Idéntica a mod_ssh.sh para coherencia
+# FUNCIÓN: RECOMPILAR DROPBEAR
 # ============================================================
 _recompilar_dropbear() {
-    local VER="$1"   # "2016.74" o "2019.78"
+    local VER="$1"
     local URL="$2"
     local PREFIX="$3"
     local CF="$4"
@@ -191,10 +183,7 @@ _recompilar_dropbear() {
     wget -q --timeout=90 -O "$TB" "$URL" 2>/dev/null \
     || wget -q --timeout=90 -O "$TB" "https://dropbear.nl/mirror/releases/$TB" 2>/dev/null
 
-    if [ ! -s "$TB" ]; then
-        echo "✗ No se pudo descargar el tarball"
-        cd /root; return 1
-    fi
+    if [ ! -s "$TB" ]; then echo "✗ No se pudo descargar el tarball"; cd /root; return 1; fi
 
     rm -rf "/usr/src/dropbear-${VER}"
     tar xjf "$TB" -C /usr/src 2>/dev/null
@@ -208,28 +197,26 @@ _recompilar_dropbear() {
     export CFLAGS="$CF"
     ./configure --prefix="$PREFIX" --disable-zlib --disable-wtmp --disable-lastlog >/dev/null 2>&1
 
-    echo "Compilando... (puede tardar 2-5 minutos)"
     if echo "$VER" | grep -q "^2016"; then
-        echo "  → Sublibs en -j1 primero (necesario para 2016)..."
         [ -d libtommath  ] && make -C libtommath  -j1 CFLAGS="$CF" >/dev/null 2>&1
         [ -d libtomcrypt ] && make -C libtomcrypt -j1 CFLAGS="$CF" >/dev/null 2>&1
     fi
-    make -j$(nproc) PROGRAMS="dropbear dropbearkey" CFLAGS="$CF" >/tmp/recomp_${VER}.log 2>&1
+    make -j$(nproc) PROGRAMS="dropbear dropbearkey" CFLAGS="$CF" >/tmp/db_compile_${VER}.log 2>&1
 
     if make install PROGRAMS="dropbear dropbearkey" >/dev/null 2>&1 \
             && [ -x "${PREFIX}/sbin/dropbear" ]; then
         cp "${PREFIX}/sbin/dropbear"   "$DEST_BIN"
         cp "${PREFIX}/bin/dropbearkey" "$DEST_KEY" 2>/dev/null
         chmod +x "$DEST_BIN" "$DEST_KEY" 2>/dev/null
-        unset CFLAGS
-        VER_CORTA=$(echo "$VER" | cut -d. -f1)
+        local VER_CORTA="${VER%%.*}"  # "2016" or "2019"
         echo "1" > "$DB_KEYS/has_${VER_CORTA}.txt"
+        unset CFLAGS
         echo "✓ Dropbear $VER compilado correctamente"
         cd /root; return 0
     else
         unset CFLAGS
-        echo "✗ Compilación fallida — últimas líneas:"
-        tail -8 "/tmp/recomp_${VER}.log" 2>/dev/null
+        echo "✗ Compilación fallida — últimas líneas del log:"
+        tail -5 /tmp/db_compile_${VER}.log 2>/dev/null
         cd /root; return 1
     fi
 }
@@ -241,42 +228,33 @@ menu_principal() {
     while true; do
         clear
 
-        IP=$(curl -4 -s --max-time 5 ifconfig.me 2>/dev/null \
-          || curl -4 -s --max-time 5 api4.ipify.org 2>/dev/null \
-          || hostname -I | tr ' ' '\n' | grep -v ':' | head -1)
+        DB_VER143=$(_db_active_ver)
+        DB_VER142="2019.78"
 
-        # Estado de puertos
-        S_SSH=$(port_status 22 t)
-        S_DB143=$(port_status 143 t)
-        S_DB142=$(port_status 142 t)
-        S_SSL443=$(port_status 443 t)
-        S_SSL444=$(port_status 444 t)
-        S_SSL777=$(port_status 777 t)
-        S_P80=$(port_status 80 t)
-        S_P8080=$(port_status 8080 t)
-        S_P8880=$(port_status 8880 t)
-        S_P8888=$(port_status 8888 t)
-        S_BADVPN=$(port_status 7300 u)
-        S_HYSTERIA=$(systemctl is-active --quiet hysteria 2>/dev/null \
-            && echo -e "\033[1;32mON\033[0m" || echo -e "\033[1;31mOFF\033[0m")
+        # Estado puertos
+        port_status() {
+            local port=$1 proto=${2:-tcp}
+            if ss -${proto}lnp 2>/dev/null | grep -q ":${port} "; then
+                echo -e "\033[1;32mON\033[0m"
+            else
+                echo -e "\033[1;31mOFF\033[0m"
+            fi
+        }
 
-        # Versiones activas
-        DB_VER143=$(cat "$DB_KEYS/active_version.txt" 2>/dev/null || echo "?")
-        # Para puerto 142, detectar cuál está corriendo
-        if systemctl is-active --quiet dropbear-2019-78 2>/dev/null \
-           || systemctl is-active --quiet msy-wrap-142 2>/dev/null; then
-            DB_VER142="2019.78"
-        else
-            DB_VER142="---"
-        fi
+        S_SSH=$(port_status 22); S_DB143=$(port_status 143); S_DB142=$(port_status 142)
+        S_SSL443=$(port_status 443); S_SSL444=$(port_status 444); S_SSL777=$(port_status 777)
+        S_P80=$(port_status 80); S_P8080=$(port_status 8080)
+        S_P8880=$(port_status 8880); S_P8888=$(port_status 8888)
+        S_BADVPN=$(port_status 7300 udp)
+        S_HYSTERIA=$(systemctl is-active --quiet hysteria 2>/dev/null && echo -e "\033[1;32mON\033[0m" || echo -e "\033[1;31mOFF\033[0m")
+        S_SNIPROXY=$(screen -ls 2>/dev/null | grep -q "sni-" && echo -e "\033[1;32mON\033[0m" || echo -e "\033[1;31mOFF\033[0m")
+        S_SSLREMOTE=$(pgrep -f "ssl-remote.conf" >/dev/null 2>&1 && echo -e "\033[1;32mON\033[0m" || echo -e "\033[1;31mOFF\033[0m")
 
-        echo -e "${CYAN}╔══════════════════════════════════════════════╗${NC}"
-        echo -e "${CYAN}║${NC}      ${BOLD}MSY VPN PANEL - v105${NC}              ${CYAN}║${NC}"
-        echo -e "${CYAN}║${NC}      t.me/FREEINTERNETVPNMSY              ${CYAN}║${NC}"
-        echo -e "${CYAN}╚══════════════════════════════════════════════╝${NC}"
-        echo -e " ${GREEN}IP:${NC} ${YELLOW}$IP${NC}"
+        echo -e " \033[1;36m╔══════════════════════════════════════════════╗\033[0m"
+        echo -e " \033[1;36m║\033[0m  \033[1m MSY VPN SCRIPT v106  t.me/FREEINTERNETVPNMSY\033[0m \033[1;36m║\033[0m"
+        echo -e " \033[1;36m╚══════════════════════════════════════════════╝\033[0m"
         echo ""
-        echo -e " ${CYAN}━━━ PUERTOS ACTIVOS ━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e " \033[1;36m━━━ TCP ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
         echo -e "  SSH       :22   $S_SSH"
         echo -e "  DB v${DB_VER143}  :143  $S_DB143  ← Principal"
         echo -e "  DB v${DB_VER142}  :142  $S_DB142  ← Secundario"
@@ -284,18 +262,19 @@ menu_principal() {
         echo -e "  SSL       :777  $S_SSL777"
         echo -e "  Proxy     :80   $S_P80    │  Proxy :8080  $S_P8080"
         echo -e "  Proxy     :8880 $S_P8880  │  Proxy :8888  $S_P8888"
-        echo -e " ${CYAN}━━━ UDP ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "  SNI Proxy:      $S_SNIPROXY  │  SSL Remote: $S_SSLREMOTE"
+        echo -e " \033[1;36m━━━ UDP ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
         echo -e "  BadVPN UDPGW :7300  $S_BADVPN"
         echo -e "  Hysteria UDP        $S_HYSTERIA"
-        echo -e " ${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e " \033[1;36m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
         echo ""
-        echo -e " ${BLUE}1)${NC} Crear usuario       ${BLUE}2)${NC} Eliminar usuario"
-        echo -e " ${BLUE}3)${NC} Ver conectados      ${BLUE}4)${NC} Proxies Python"
-        echo -e " ${BLUE}5)${NC} Túneles SSL/TLS     ${BLUE}6)${NC} Banner HTTP proxy"
-        echo -e " ${BLUE}7)${NC} Dropbear :143/:142  ${BLUE}8)${NC} Hysteria UDP"
-        echo -e " ${BLUE}9)${NC} Estado servicios   ${BLUE}10)${NC} Reiniciar servicios"
-        echo -e "${RED} D)${NC} Desinstalar script  ${RED} 0)${NC} Salir"
-        echo -e " ${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e " \033[0;34m1)\033[0m Crear usuario       \033[0;34m2)\033[0m Eliminar usuario"
+        echo -e " \033[0;34m3)\033[0m Ver conectados      \033[0;34m4)\033[0m Proxies HTTP"
+        echo -e " \033[0;34m5)\033[0m Túneles SSL/SNI     \033[0;34m6)\033[0m Banner HTTP proxy"
+        echo -e " \033[0;34m7)\033[0m Dropbear :143/:142  \033[0;34m8)\033[0m Hysteria UDP"
+        echo -e " \033[0;34m9)\033[0m Estado servicios   \033[0;34m10)\033[0m Reiniciar servicios"
+        echo -e "\033[1;31m D)\033[0m Desinstalar script  \033[1;31m 0)\033[0m Salir"
+        echo -e " \033[1;36m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
         read -p " Opción: " option
 
         case $option in
@@ -305,7 +284,7 @@ menu_principal() {
                 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
                 read -p "Nombre de usuario: " username
                 read -p "Contraseña: " password
-                read -p "Días de validez (0 = ilimitado): " days
+                read -p "Días de validez (0 = ilimitado): \" days
 
                 if id "$username" &>/dev/null; then
                     echo "El usuario ya existe"
@@ -359,7 +338,7 @@ USEREOF
 
             4)
                 clear
-                echo "PROXIES PYTHON"
+                echo "PROXIES HTTP (Python)"
                 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
                 echo "1) Iniciar nuevo proxy"
                 echo "2) Detener todos los proxies"
@@ -414,63 +393,211 @@ USEREOF
                 ;;
 
             5)
-                clear
-                echo "TÚNELES SSL/TLS (Stunnel)"
-                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-                echo "1) Ver túneles activos"
-                echo "2) Agregar nuevo túnel"
-                echo "3) Desactivar / eliminar un túnel"
-                echo "4) Reiniciar Stunnel"
-                echo "0) Volver"
-                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-                read -p "Opción: " tunnel_opt
-                case $tunnel_opt in
-                    1)
-                        clear
-                        echo "TÚNELES SSL ACTIVOS:"
-                        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-                        grep -E '^\[|^accept|^connect' /etc/stunnel/stunnel.conf 2>/dev/null
-                        echo ""
-                        echo "Puertos escuchando:"
-                        ss -tlnp 2>/dev/null | grep stunnel || echo "  (ninguno)"
-                        echo ""
-                        pgrep -x stunnel4 >/dev/null 2>&1 \
-                            && echo -e "${GREEN}✓ Stunnel activo (PID: $(pgrep -x stunnel4 | head -1))${NC}" \
-                            || echo -e "${RED}✗ Stunnel NO activo${NC}"
-                        read -p "ENTER..."
-                        ;;
-                    2)
-                        clear
-                        echo "AGREGAR NUEVO TÚNEL SSL"
-                        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-                        read -p "Nombre del túnel (ej: tunnel-8443): " tunnel_name
-                        read -p "Puerto de escucha (ej: 8443): " tunnel_port
-                        echo "Backend destino:"
-                        echo "  143 - Dropbear 2016.74 (principal)"
-                        echo "  142 - Dropbear 2019.78 (secundario)"
-                        echo "   22 - OpenSSH"
-                        read -p "Puerto destino [143]: " tunnel_dest
-                        tunnel_dest=${tunnel_dest:-143}
-                        ssl_add_port "$tunnel_name" "$tunnel_port" "$tunnel_dest"
-                        read -p "ENTER..."
-                        ;;
-                    3)
-                        clear
-                        echo "DESACTIVAR TÚNEL SSL"
-                        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-                        echo "Túneles configurados:"
-                        grep -E '^\[|^accept' /etc/stunnel/stunnel.conf 2>/dev/null | \
-                            awk '/^\[/{n=$0} /^accept/{print n" → "$0}'
-                        echo ""
-                        read -p "Puerto a desactivar (ej: 443): " rm_port
-                        [ -n "$rm_port" ] && ssl_remove_port "$rm_port" || echo "Cancelado."
-                        read -p "ENTER..."
-                        ;;
-                    4)
-                        stunnel_restart
-                        read -p "ENTER..."
-                        ;;
-                esac
+                # ============================================================
+                # SUB-MENÚ SSL/TLS/SNI
+                # ============================================================
+                while true; do
+                    clear
+                    echo -e "\033[1;36m╔══════════════════════════════════════════════╗\033[0m"
+                    echo -e "\033[1;36m║\033[0m       \033[1mTÚNELES SSL / SNI / REMOTE\033[0m         \033[1;36m║\033[0m"
+                    echo -e "\033[1;36m╚══════════════════════════════════════════════╝\033[0m"
+                    echo ""
+                    echo -e " \033[1;33m── SSL/TLS SERVER (Stunnel) ────────────────\033[0m"
+                    echo -e " \033[0;34m1)\033[0m Ver túneles SSL activos"
+                    echo -e " \033[0;34m2)\033[0m Agregar nuevo túnel SSL"
+                    echo -e " \033[0;34m3)\033[0m Desactivar / eliminar túnel SSL"
+                    echo -e " \033[0;34m4)\033[0m Reiniciar Stunnel"
+                    echo ""
+                    echo -e " \033[1;33m── SSH PAYLOAD SNI PROXY ───────────────────\033[0m"
+                    echo -e " \033[0;34m5)\033[0m Iniciar SSH Payload SNI Proxy"
+                    echo -e " \033[0;34m6)\033[0m Ver SNI Proxies activos"
+                    echo -e " \033[0;34m7)\033[0m Detener SNI Proxy"
+                    echo ""
+                    echo -e " \033[1;33m── SSL REMOTE PROXY (CLIENT MODE) ──────────\033[0m"
+                    echo -e " \033[0;34m8)\033[0m Iniciar SSL Remote Proxy"
+                    echo -e " \033[0;34m9)\033[0m Ver estado SSL Remote Proxy"
+                    echo -e " \033[0;34mR)\033[0m Detener SSL Remote Proxy"
+                    echo ""
+                    echo -e " \033[1;31m0)\033[0m Volver"
+                    echo -e " \033[1;36m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
+                    read -p " Opción: " tunnel_opt
+
+                    case $tunnel_opt in
+                        1)
+                            clear
+                            echo "TÚNELES SSL ACTIVOS:"
+                            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                            grep -E '^\[|^accept|^connect' /etc/stunnel/stunnel.conf 2>/dev/null
+                            echo ""
+                            echo "Puertos escuchando:"
+                            ss -tlnp 2>/dev/null | grep stunnel || echo "  (ninguno)"
+                            echo ""
+                            pgrep -x stunnel4 >/dev/null 2>&1 \
+                                && echo -e "\033[1;32m✓ Stunnel activo (PID: $(pgrep -x stunnel4 | head -1))\033[0m" \
+                                || echo -e "\033[1;31m✗ Stunnel NO activo\033[0m"
+                            read -p "ENTER..."
+                            ;;
+                        2)
+                            clear
+                            echo "AGREGAR NUEVO TÚNEL SSL"
+                            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                            read -p "Nombre del túnel (ej: tunnel-8443): " tunnel_name
+                            read -p "Puerto de escucha (ej: 8443): " tunnel_port
+                            echo "Backend destino:"
+                            echo "  143 - Dropbear 2016.74 (principal)"
+                            echo "  142 - Dropbear 2019.78 (secundario)"
+                            echo "   22 - OpenSSH"
+                            read -p "Puerto destino [143]: " tunnel_dest
+                            tunnel_dest=${tunnel_dest:-143}
+                            ssl_add_port "$tunnel_name" "$tunnel_port" "$tunnel_dest"
+                            read -p "ENTER..."
+                            ;;
+                        3)
+                            clear
+                            echo "DESACTIVAR TÚNEL SSL"
+                            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                            echo "Túneles configurados:"
+                            grep -E '^\[|^accept' /etc/stunnel/stunnel.conf 2>/dev/null | \
+                                awk '/^\[/{n=$0} /^accept/{print n" → "$0}'
+                            echo ""
+                            read -p "Puerto a desactivar (ej: 443): " rm_port
+                            [ -n "$rm_port" ] && ssl_remove_port "$rm_port" || echo "Cancelado."
+                            read -p "ENTER..."
+                            ;;
+                        4)
+                            stunnel_restart
+                            read -p "ENTER..."
+                            ;;
+
+                        # ── SSH PAYLOAD SNI ──────────────────────────────
+                        5)
+                            clear
+                            echo "INICIAR SSH PAYLOAD SNI PROXY"
+                            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                            echo "Conecta via SSL con SNI personalizado + payload HTTP"
+                            echo "Útil cuando el operador requiere SNI específico"
+                            echo ""
+                            read -p "Puerto local (ej: 2443): " sni_local_port
+                            read -p "Host remoto (IP o dominio): " sni_remote_host
+                            read -p "Puerto remoto [443]: " sni_remote_port
+                            sni_remote_port=${sni_remote_port:-443}
+                            read -p "SNI host [ENTER = mismo que host remoto]: " sni_sni_host
+                            sni_sni_host=${sni_sni_host:-$sni_remote_host}
+                            echo ""
+                            echo "Payload (usa [host],[port],[host_port],[crlf]):"
+                            echo "  Ejemplo: CONNECT [host_port] HTTP/1.0[crlf]Host: [host][crlf][crlf]"
+                            echo "  ENTER = payload CONNECT automático"
+                            read -p "Payload: " sni_payload
+                            echo "Backend SSH destino:"
+                            echo "  1) Dropbear :143 (principal)"
+                            echo "  2) Dropbear :142"
+                            echo "  3) OpenSSH :22"
+                            read -p "Opción [1]: " sni_backend
+                            case $sni_backend in
+                                2) sni_ssh_port=142 ;;
+                                3) sni_ssh_port=22  ;;
+                                *) sni_ssh_port=143 ;;
+                            esac
+                            echo ""
+                            start_sni_proxy "$sni_local_port" "$sni_remote_host" \
+                                            "$sni_remote_port" "$sni_sni_host" \
+                                            "$sni_payload" "$sni_ssh_port"
+                            echo ""
+                            echo "Para conectar tu app VPN usa:"
+                            echo "  Servidor: 127.0.0.1 (o IP del VPS)"
+                            echo "  Puerto:   $sni_local_port"
+                            echo "  SSL:      NO (el proxy maneja el SSL)"
+                            read -p "ENTER..."
+                            ;;
+                        6)
+                            clear
+                            echo "SNI PROXIES ACTIVOS:"
+                            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                            local found=0
+                            screen -ls 2>/dev/null | grep "sni-" | while read -r line; do
+                                port=$(echo "$line" | grep -oP 'sni-\K[0-9]+')
+                                cfg=$(grep "^SNI_${port}|" /etc/proxy-python/sni-proxies.conf 2>/dev/null)
+                                echo "  :$port — activo"
+                                [ -n "$cfg" ] && echo "    Config: $cfg"
+                                found=1
+                            done
+                            screen -ls 2>/dev/null | grep -q "sni-" || echo "  Ningún SNI Proxy activo"
+                            echo ""
+                            echo "Configuración guardada:"
+                            cat /etc/proxy-python/sni-proxies.conf 2>/dev/null || echo "  (vacío)"
+                            read -p "ENTER..."
+                            ;;
+                        7)
+                            clear
+                            echo "DETENER SNI PROXY"
+                            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                            echo "SNI Proxies activos:"
+                            screen -ls 2>/dev/null | grep "sni-" | awk '{print $1}' || echo "  Ninguno"
+                            echo ""
+                            read -p "Puerto a detener: " sni_stop_port
+                            [ -n "$sni_stop_port" ] && stop_sni_proxy "$sni_stop_port" || echo "Cancelado."
+                            read -p "ENTER..."
+                            ;;
+
+                        # ── SSL REMOTE PROXY ─────────────────────────────
+                        8)
+                            clear
+                            echo "INICIAR SSL REMOTE PROXY"
+                            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                            echo "Usa stunnel en modo CLIENT para conectar a un"
+                            echo "servidor SSL remoto (CDN, CDNs, etc.)"
+                            echo ""
+                            read -p "Host remoto SSL (IP o dominio): " ssl_rem_host
+                            read -p "Puerto remoto [443]: " ssl_rem_port
+                            ssl_rem_port=${ssl_rem_port:-443}
+                            read -p "SNI host [ENTER = mismo que host remoto]: " ssl_rem_sni
+                            ssl_rem_sni=${ssl_rem_sni:-$ssl_rem_host}
+                            read -p "Puerto local de salida [2443]: " ssl_rem_local
+                            ssl_rem_local=${ssl_rem_local:-2443}
+                            echo "Backend SSH destino tras el túnel:"
+                            echo "  1) Dropbear :143 (principal)"
+                            echo "  2) Dropbear :142"
+                            echo "  3) OpenSSH :22"
+                            read -p "Opción [1]: " ssl_rem_backend
+                            case $ssl_rem_backend in
+                                2) ssl_rem_ssh=142 ;;
+                                3) ssl_rem_ssh=22  ;;
+                                *) ssl_rem_ssh=143 ;;
+                            esac
+                            echo ""
+                            ssl_remote_start "$ssl_rem_host" "$ssl_rem_port" \
+                                             "$ssl_rem_sni"  "$ssl_rem_local" "$ssl_rem_ssh"
+                            read -p "ENTER..."
+                            ;;
+                        9)
+                            clear
+                            echo "ESTADO SSL REMOTE PROXY"
+                            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                            if pgrep -f "ssl-remote.conf" >/dev/null 2>&1; then
+                                echo -e "\033[1;32m✓ SSL Remote Proxy activo\033[0m"
+                                if [ -f /etc/ssh-vpn/ssl-remote.env ]; then
+                                    source /etc/ssh-vpn/ssl-remote.env
+                                    echo "  Remoto:  $REMOTE_HOST:$REMOTE_PORT"
+                                    echo "  SNI:     $SNI_HOST"
+                                    echo "  Local:   127.0.0.1:$LOCAL_OUT_PORT"
+                                    echo "  SSH dst: $SSH_DEST_PORT"
+                                fi
+                            else
+                                echo -e "\033[1;31m✗ SSL Remote Proxy NO activo\033[0m"
+                                [ -f /etc/ssh-vpn/ssl-remote.env ] && echo "  (config guardada, se restaurará al reinicio)"
+                            fi
+                            echo ""
+                            echo "Config SSL Remote:"
+                            cat /etc/stunnel/ssl-remote.conf 2>/dev/null || echo "  (sin config activa)"
+                            read -p "ENTER..."
+                            ;;
+                        R|r)
+                            ssl_remote_stop
+                            read -p "ENTER..."
+                            ;;
+                        0) break ;;
+                    esac
+                done
                 ;;
 
             6)
@@ -488,16 +615,12 @@ USEREOF
                 ;;
 
             7)
-                # ============================================================
-                # SUB-MENÚ DROPBEAR
-                # Permite cambiar la versión en :143 y en :142 independientemente
-                # ============================================================
+                # ── SUB-MENÚ DROPBEAR ────────────────────────────────
                 while true; do
                     clear
                     DB2016=$(_db_has_2016)
                     DB2019=$(_db_has_2019)
 
-                    # Detectar qué corre en cada puerto
                     if systemctl is-active --quiet dropbear-2016-74 2>/dev/null \
                        || systemctl is-active --quiet msy-wrap-143 2>/dev/null; then
                         VER143_ACTIVA="2016.74"
@@ -519,63 +642,60 @@ USEREOF
                     ST143=$(_db_port_status "2016.74" 143)
                     ST142=$(_db_port_status "2019.78" 142)
 
-                    echo -e "${CYAN}╔══════════════════════════════════════════════╗${NC}"
-                    echo -e "${CYAN}║${NC}       ${BOLD}GESTIÓN DROPBEAR - MSY VPN${NC}        ${CYAN}║${NC}"
-                    echo -e "${CYAN}╚══════════════════════════════════════════════╝${NC}"
+                    echo -e "\033[1;36m╔══════════════════════════════════════════════╗\033[0m"
+                    echo -e "\033[1;36m║\033[0m       \033[1mGESTIÓN DROPBEAR - MSY VPN\033[0m        \033[1;36m║\033[0m"
+                    echo -e "\033[1;36m╚══════════════════════════════════════════════╝\033[0m"
                     echo ""
-                    echo -e " ${CYAN}━━━ PUERTOS DROPBEAR ━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-                    echo -e "  Puerto ${YELLOW}:143${NC} → versión activa: ${YELLOW}${VER143_ACTIVA}${NC}  $ST143"
-                    echo -e "  Puerto ${YELLOW}:142${NC} → versión activa: ${YELLOW}${VER142_ACTIVA}${NC}  $ST142"
+                    echo -e " \033[1;36m━━━ PUERTOS DROPBEAR ━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
+                    echo -e "  Puerto \033[1;33m:143\033[0m → versión activa: \033[1;33m${VER143_ACTIVA}\033[0m  $ST143"
+                    echo -e "  Puerto \033[1;33m:142\033[0m → versión activa: \033[1;33m${VER142_ACTIVA}\033[0m  $ST142"
                     echo ""
-                    echo -e " ${CYAN}━━━ VERSIONES COMPILADAS ━━━━━━━━━━━━━━━━━━━${NC}"
-                    if [ "$DB2016" = "1" ]; then
-                        echo -e "  ${GREEN}✓${NC} 2016.74  → $DB_DIR/dropbear-2016.74"
-                    else
-                        echo -e "  ${RED}✗${NC} 2016.74  → no compilado"
-                    fi
-                    if [ "$DB2019" = "1" ]; then
-                        echo -e "  ${GREEN}✓${NC} 2019.78  → $DB_DIR/dropbear-2019.78"
-                    else
-                        echo -e "  ${RED}✗${NC} 2019.78  → no compilado"
-                    fi
-                    echo -e "  ${GREEN}✓${NC} OpenSSH  → siempre disponible (fallback)"
+                    echo -e " \033[1;36m━━━ VERSIONES COMPILADAS ━━━━━━━━━━━━━━━━━━━\033[0m"
+                    [ "$DB2016" = "1" ] \
+                        && echo -e "  \033[1;32m✓\033[0m 2016.74  → $DB_DIR/dropbear-2016.74" \
+                        || echo -e "  \033[1;31m✗\033[0m 2016.74  → no compilado"
+                    [ "$DB2019" = "1" ] \
+                        && echo -e "  \033[1;32m✓\033[0m 2019.78  → $DB_DIR/dropbear-2019.78" \
+                        || echo -e "  \033[1;31m✗\033[0m 2019.78  → no compilado"
                     echo ""
-                    echo -e " ${CYAN}━━━ CAMBIAR VERSIÓN EN PUERTO 143 ━━━━━━━━━━━${NC}"
-                    echo -e " ${BLUE}1)${NC} Poner Dropbear ${YELLOW}2016.74${NC} en :143 (recomendado)"
-                    echo -e " ${BLUE}2)${NC} Poner Dropbear ${YELLOW}2019.78${NC} en :143"
-                    echo -e " ${BLUE}3)${NC} Poner OpenSSH (fallback) en :143"
+                    echo -e " \033[1;36m━━━ ACCIONES PUERTO :143 ━━━━━━━━━━━━━━━━━━\033[0m"
+                    echo -e " \033[0;34m1)\033[0m Poner Dropbear \033[1;33m2016.74\033[0m en :143 (recomendado)"
+                    echo -e " \033[0;34m2)\033[0m Poner Dropbear \033[1;33m2019.78\033[0m en :143"
+                    echo -e " \033[0;34m3)\033[0m Poner OpenSSH \033[1;33mfallback\033[0m en :143"
                     echo ""
-                    echo -e " ${CYAN}━━━ CAMBIAR VERSIÓN EN PUERTO 142 ━━━━━━━━━━━${NC}"
-                    echo -e " ${BLUE}4)${NC} Poner Dropbear ${YELLOW}2019.78${NC} en :142 (recomendado)"
-                    echo -e " ${BLUE}5)${NC} Poner Dropbear ${YELLOW}2016.74${NC} en :142"
-                    echo -e " ${BLUE}6)${NC} Desactivar puerto :142"
+                    echo -e " \033[1;36m━━━ ACCIONES PUERTO :142 ━━━━━━━━━━━━━━━━━━\033[0m"
+                    echo -e " \033[0;34m4)\033[0m Poner Dropbear \033[1;33m2019.78\033[0m en :142 (recomendado)"
+                    echo -e " \033[0;34m5)\033[0m Poner Dropbear \033[1;33m2016.74\033[0m en :142"
+                    echo -e " \033[0;34m6)\033[0m Desactivar :142"
                     echo ""
-                    echo -e " ${CYAN}━━━ OTRAS ACCIONES ━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-                    echo -e " ${BLUE}7)${NC} Reiniciar ambos puertos Dropbear"
-                    echo -e " ${BLUE}8)${NC} Ver log Dropbear :143"
-                    echo -e " ${BLUE}9)${NC} Ver log Dropbear :142"
-                    echo -e " ${BLUE}10)${NC} Cambiar banner Dropbear"
-                    echo -e " ${BLUE}11)${NC} Recompilar Dropbear 2016.74"
-                    echo -e " ${BLUE}12)${NC} Recompilar Dropbear 2019.78"
-                    echo -e " ${BLUE}0)${NC}  Volver al menú principal"
-                    echo -e " ${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+                    echo -e " \033[1;36m━━━ COMPILACIÓN ━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
+                    echo -e " \033[0;34m11)\033[0m Recompilar Dropbear 2016.74"
+                    echo -e " \033[0;34m12)\033[0m Recompilar Dropbear 2019.78"
+                    echo -e " \033[1;31m 0)\033[0m Volver"
+                    echo -e " \033[1;36m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
                     read -p " Opción: " db_opt
+
+                    GCC_VER=$(gcc -dumpversion 2>/dev/null | cut -d. -f1); GCC_VER=${GCC_VER:-0}
+                    if [ "$GCC_VER" -ge 10 ] 2>/dev/null; then
+                        CF16="-w -fcommon -Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=int-conversion -Wno-error=incompatible-pointer-types -Wno-error=deprecated-declarations"
+                    else
+                        CF16="-w -fcommon"
+                    fi
+                    if [ "$GCC_VER" -ge 12 ] 2>/dev/null; then
+                        CF19="-w -fcommon -Wno-error=deprecated-declarations"
+                    else
+                        CF19="-w -fcommon"
+                    fi
 
                     case $db_opt in
                         1)
-                            if [ "$DB2016" != "1" ]; then
-                                echo "✗ 2016.74 no compilado — usa opción 11"
-                            else
-                                _cambiar_dropbear_puerto "2016.74" 143 1143
-                            fi
+                            [ "$DB2016" != "1" ] && { echo "✗ 2016.74 no compilado — usa opción 11"; read -p "ENTER..."; continue; }
+                            _cambiar_dropbear_puerto "2016.74" 143 1143
                             read -p "ENTER..."
                             ;;
                         2)
-                            if [ "$DB2019" != "1" ]; then
-                                echo "✗ 2019.78 no compilado — usa opción 12"
-                            else
-                                _cambiar_dropbear_puerto "2019.78" 143 1143
-                            fi
+                            [ "$DB2019" != "1" ] && { echo "✗ 2019.78 no compilado — usa opción 12"; read -p "ENTER..."; continue; }
+                            _cambiar_dropbear_puerto "2019.78" 143 1143
                             read -p "ENTER..."
                             ;;
                         3)
@@ -583,118 +703,34 @@ USEREOF
                             read -p "ENTER..."
                             ;;
                         4)
-                            if [ "$DB2019" != "1" ]; then
-                                echo "✗ 2019.78 no compilado — usa opción 12"
-                            else
-                                _cambiar_dropbear_puerto "2019.78" 142 1142
-                            fi
+                            [ "$DB2019" != "1" ] && { echo "✗ 2019.78 no compilado — usa opción 12"; read -p "ENTER..."; continue; }
+                            _cambiar_dropbear_puerto "2019.78" 142 1142
                             read -p "ENTER..."
                             ;;
                         5)
-                            if [ "$DB2016" != "1" ]; then
-                                echo "✗ 2016.74 no compilado — usa opción 11"
-                            else
-                                _cambiar_dropbear_puerto "2016.74" 142 1142
-                            fi
+                            [ "$DB2016" != "1" ] && { echo "✗ 2016.74 no compilado — usa opción 11"; read -p "ENTER..."; continue; }
+                            _cambiar_dropbear_puerto "2016.74" 142 1142
                             read -p "ENTER..."
                             ;;
                         6)
                             echo "Desactivando puerto 142..."
                             systemctl stop dropbear-2019-78 msy-wrap-142 2>/dev/null
                             fuser -k 142/tcp 2>/dev/null
-                            echo "✓ Puerto 142 desactivado"
-                            read -p "ENTER..."
-                            ;;
-                        7)
-                            echo "Reiniciando Dropbear :143 y :142..."
-                            systemctl restart dropbear-2016-74 msy-wrap-143 2>/dev/null
-                            systemctl restart dropbear-2019-78 msy-wrap-142 2>/dev/null
-                            sleep 2
-                            echo -e ":143 $(port_status 143 t)"
-                            echo -e ":142 $(port_status 142 t)"
-                            read -p "ENTER..."
-                            ;;
-                        8)
-                            clear
-                            echo "LOG Dropbear :143 (últimas 25 líneas):"
-                            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-                            journalctl -u dropbear-2016-74 --no-pager -n 25 2>/dev/null \
-                                || echo "  Sin logs disponibles"
-                            read -p "ENTER..."
-                            ;;
-                        9)
-                            clear
-                            echo "LOG Dropbear :142 (últimas 25 líneas):"
-                            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-                            journalctl -u dropbear-2019-78 --no-pager -n 25 2>/dev/null \
-                                || echo "  Sin logs disponibles"
-                            read -p "ENTER..."
-                            ;;
-                        10)
-                            clear
-                            echo "BANNER DROPBEAR"
-                            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-                            echo "Banner actual:"
-                            cat "$DB_KEYS/banner.txt" 2>/dev/null || echo "(vacío)"
-                            echo ""
-                            echo "Nuevo banner (escribe FIN en línea sola para terminar):"
-                            > /tmp/new_banner.txt
-                            while true; do
-                                read -r line
-                                [ "$line" = "FIN" ] && break
-                                echo "$line" >> /tmp/new_banner.txt
-                            done
-                            if [ -s /tmp/new_banner.txt ]; then
-                                cp /tmp/new_banner.txt "$DB_KEYS/banner.txt"
-                                systemctl restart dropbear-2016-74 dropbear-2019-78 2>/dev/null
-                                echo "✓ Banner actualizado y Dropbear reiniciado"
-                            fi
-                            rm -f /tmp/new_banner.txt
+                            echo "✓ Puerto :142 desactivado"
                             read -p "ENTER..."
                             ;;
                         11)
-                            clear
                             echo "RECOMPILAR Dropbear 2016.74"
-                            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-                            # Determinar flags según GCC
-                            GCC_NOW=$(gcc -dumpversion 2>/dev/null | cut -d. -f1); GCC_NOW=${GCC_NOW:-0}
-                            if [ "$GCC_NOW" -ge 10 ] 2>/dev/null; then
-                                CF_2016="-w -fcommon -Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=int-conversion -Wno-error=incompatible-pointer-types -Wno-error=deprecated-declarations"
-                            else
-                                CF_2016="-w -fcommon"
-                            fi
-                            DEBIAN_FRONTEND=noninteractive apt-get install -y -qq gcc make libc6-dev 2>/dev/null
-                            _recompilar_dropbear \
-                                "2016.74" \
+                            _recompilar_dropbear "2016.74" \
                                 "https://matt.ucc.asn.au/dropbear/releases/dropbear-2016.74.tar.bz2" \
-                                "/opt/dropbear-2016" \
-                                "$CF_2016"
-                            if [ $? -eq 0 ]; then
-                                read -p "¿Activar 2016.74 en :143 ahora? (s/n): " act
-                                [[ $act == "s" || $act == "S" ]] && _cambiar_dropbear_puerto "2016.74" 143 1143
-                            fi
+                                "/opt/dropbear-2016" "$CF16"
                             read -p "ENTER..."
                             ;;
                         12)
-                            clear
                             echo "RECOMPILAR Dropbear 2019.78"
-                            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-                            GCC_NOW=$(gcc -dumpversion 2>/dev/null | cut -d. -f1); GCC_NOW=${GCC_NOW:-0}
-                            if [ "$GCC_NOW" -ge 12 ] 2>/dev/null; then
-                                CF_2019="-w -fcommon -Wno-error=deprecated-declarations"
-                            else
-                                CF_2019="-w -fcommon"
-                            fi
-                            DEBIAN_FRONTEND=noninteractive apt-get install -y -qq gcc make libc6-dev 2>/dev/null
-                            _recompilar_dropbear \
-                                "2019.78" \
+                            _recompilar_dropbear "2019.78" \
                                 "https://matt.ucc.asn.au/dropbear/releases/dropbear-2019.78.tar.bz2" \
-                                "/opt/dropbear-2019" \
-                                "$CF_2019"
-                            if [ $? -eq 0 ]; then
-                                read -p "¿Activar 2019.78 en :142 ahora? (s/n): " act
-                                [[ $act == "s" || $act == "S" ]] && _cambiar_dropbear_puerto "2019.78" 142 1142
-                            fi
+                                "/opt/dropbear-2019" "$CF19"
                             read -p "ENTER..."
                             ;;
                         0) break ;;
@@ -728,61 +764,73 @@ USEREOF
 
             9)
                 clear
-                echo -e "${CYAN}╔════════════════════════════════════════════╗${NC}"
-                echo -e "${CYAN}║${NC}          ${BOLD}ESTADO DE SERVICIOS${NC}             ${CYAN}║${NC}"
-                echo -e "${CYAN}╚════════════════════════════════════════════╝${NC}"
+                echo -e "\033[1;36m╔════════════════════════════════════════════╗\033[0m"
+                echo -e "\033[1;36m║\033[0m          \033[1mESTADO DE SERVICIOS\033[0m             \033[1;36m║\033[0m"
+                echo -e "\033[1;36m╚════════════════════════════════════════════╝\033[0m"
                 echo ""
 
                 systemctl is-active --quiet ssh \
-                    && echo -e "${GREEN}✓ OpenSSH:          Activo${NC}  (puerto 22)" \
-                    || echo -e "${RED}✗ OpenSSH:          Inactivo${NC}"
+                    && echo -e "\033[1;32m✓ OpenSSH:          Activo\033[0m  (puerto 22)" \
+                    || echo -e "\033[1;31m✗ OpenSSH:          Inactivo\033[0m"
 
-                # Dropbear :143
                 if systemctl is-active --quiet dropbear-2016-74 2>/dev/null \
                    || systemctl is-active --quiet msy-wrap-143 2>/dev/null; then
-                    echo -e "${GREEN}✓ Dropbear :143:    Activo${NC}  (v2016.74 — principal)"
+                    echo -e "\033[1;32m✓ Dropbear :143:    Activo\033[0m  (v2016.74 — principal)"
                 elif ss -tlnp 2>/dev/null | grep -q ":143 "; then
-                    echo -e "${GREEN}✓ Puerto :143:      Activo${NC}  (servicio alternativo)"
+                    echo -e "\033[1;32m✓ Puerto :143:      Activo\033[0m  (servicio alternativo)"
                 else
-                    echo -e "${RED}✗ Dropbear :143:    Inactivo${NC}"
+                    echo -e "\033[1;31m✗ Dropbear :143:    Inactivo\033[0m"
                 fi
 
-                # Dropbear :142
                 if systemctl is-active --quiet dropbear-2019-78 2>/dev/null \
                    || systemctl is-active --quiet msy-wrap-142 2>/dev/null; then
-                    echo -e "${GREEN}✓ Dropbear :142:    Activo${NC}  (v2019.78 — secundario)"
+                    echo -e "\033[1;32m✓ Dropbear :142:    Activo\033[0m  (v2019.78 — secundario)"
                 elif ss -tlnp 2>/dev/null | grep -q ":142 "; then
-                    echo -e "${GREEN}✓ Puerto :142:      Activo${NC}  (servicio alternativo)"
+                    echo -e "\033[1;32m✓ Puerto :142:      Activo\033[0m  (servicio alternativo)"
                 else
-                    echo -e "${YELLOW}⚠ Dropbear :142:    Inactivo${NC}"
+                    echo -e "\033[1;33m⚠ Dropbear :142:    Inactivo\033[0m"
                 fi
 
-                systemctl is-active --quiet stunnel4 \
-                    && echo -e "${GREEN}✓ Stunnel SSL:      Activo${NC}  (443, 444, 777)" \
-                    || echo -e "${RED}✗ Stunnel SSL:      Inactivo${NC}"
+                # Stunnel — verificar proceso real, no solo systemctl
+                if pgrep -x stunnel4 >/dev/null 2>&1; then
+                    echo -e "\033[1;32m✓ Stunnel SSL:      Activo\033[0m  (443, 444, 777)"
+                else
+                    echo -e "\033[1;31m✗ Stunnel SSL:      Inactivo\033[0m  ← usa Opción 10 → 5"
+                fi
+
                 systemctl is-active --quiet badvpn-udpgw \
-                    && echo -e "${GREEN}✓ BadVPN UDPGW:     Activo${NC}  (UDP :7300)" \
-                    || echo -e "${RED}✗ BadVPN UDPGW:     Inactivo${NC}"
+                    && echo -e "\033[1;32m✓ BadVPN UDPGW:     Activo\033[0m  (UDP :7300)" \
+                    || echo -e "\033[1;31m✗ BadVPN UDPGW:     Inactivo\033[0m"
+
                 systemctl is-active --quiet hysteria 2>/dev/null \
-                    && echo -e "${GREEN}✓ Hysteria UDP:     Activo${NC}" \
-                    || echo -e "${YELLOW}⚠ Hysteria UDP:     No instalado / Inactivo${NC}"
+                    && echo -e "\033[1;32m✓ Hysteria UDP:     Activo\033[0m" \
+                    || echo -e "\033[1;33m⚠ Hysteria UDP:     No instalado / Inactivo\033[0m"
+
+                # SSL Remote
+                if pgrep -f "ssl-remote.conf" >/dev/null 2>&1; then
+                    echo -e "\033[1;32m✓ SSL Remote Proxy: Activo\033[0m"
+                else
+                    echo -e "\033[1;33m⚠ SSL Remote Proxy: Inactivo\033[0m  (opcional)"
+                fi
 
                 echo ""
-                active_proxies=$(screen -ls 2>/dev/null | grep -c "proxy-")
-                echo -e "${YELLOW}Python Proxies activos:${NC} $active_proxies"
+                active_proxies=$(screen -ls 2>/dev/null | grep -c "proxy-" || echo 0)
+                active_sni=$(screen -ls 2>/dev/null | grep -c "sni-" || echo 0)
+                echo -e "\033[1;33mProxy HTTP activos:\033[0m $active_proxies"
+                echo -e "\033[1;33mSNI Proxies activos:\033[0m $active_sni"
                 echo ""
-                echo -e "${YELLOW}Disco:${NC} $(df -h / | awk 'NR==2{print $3"/"$2" ("$5" usado)"}')"
-                echo -e "${YELLOW}RAM:${NC}   $(free -h | awk '/^Mem/{print $3"/"$2}')"
-                echo -e "${YELLOW}Swap:${NC}  $(free -h | awk '/^Swap/{print $3"/"$2}')"
+                echo -e "\033[1;33mDisco:\033[0m $(df -h / | awk 'NR==2{print $3"/"$2" ("$5" usado)"}')"
+                echo -e "\033[1;33mRAM:\033[0m   $(free -h | awk '/^Mem/{print $3"/"$2}')"
+                echo -e "\033[1;33mSwap:\033[0m  $(free -h | awk '/^Swap/{print $3"/"$2}')"
                 echo ""
-                echo -e "${CYAN}━━━ BINARIOS DROPBEAR ━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+                echo -e "\033[1;36m━━━ BINARIOS DROPBEAR ━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
                 [ "$(_db_has_2016)" = "1" ] \
-                    && echo -e "  ${GREEN}✓${NC} 2016.74  $DB_DIR/dropbear-2016.74" \
-                    || echo -e "  ${RED}✗${NC} 2016.74  no compilado"
+                    && echo -e "  \033[1;32m✓\033[0m 2016.74  $DB_DIR/dropbear-2016.74" \
+                    || echo -e "  \033[1;31m✗\033[0m 2016.74  no compilado"
                 [ "$(_db_has_2019)" = "1" ] \
-                    && echo -e "  ${GREEN}✓${NC} 2019.78  $DB_DIR/dropbear-2019.78" \
-                    || echo -e "  ${RED}✗${NC} 2019.78  no compilado"
-                echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+                    && echo -e "  \033[1;32m✓\033[0m 2019.78  $DB_DIR/dropbear-2019.78" \
+                    || echo -e "  \033[1;31m✗\033[0m 2019.78  no compilado"
+                echo -e "\033[1;36m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
                 read -p "ENTER para continuar..."
                 ;;
 
@@ -797,7 +845,9 @@ USEREOF
                 echo "5) Reiniciar Stunnel"
                 echo "6) Reiniciar BadVPN UDPGW"
                 echo "7) Reiniciar Hysteria UDP"
-                echo "8) Reiniciar TODO"
+                echo "8) Reiniciar SNI Proxies"
+                echo "9) Reiniciar SSL Remote Proxy"
+                echo "A) Reiniciar TODO"
                 echo "0) Volver"
                 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
                 read -p "Opción: " restart_opt
@@ -809,18 +859,37 @@ USEREOF
                     5) stunnel_restart; read -p "ENTER..." ;;
                     6) systemctl restart badvpn-udpgw && echo "✓ BadVPN reiniciado" || echo "✗ Error"; read -p "ENTER..." ;;
                     7) systemctl restart hysteria 2>/dev/null && echo "✓ Hysteria reiniciado" || echo "✗ Hysteria no instalado"; read -p "ENTER..." ;;
-                    8) restart_all_services; echo ""; read -p "ENTER..." ;;
+                    8) 
+                        echo "Reiniciando SNI Proxies..."
+                        screen -ls 2>/dev/null | grep "sni-" | awk '{print $1}' | xargs -I {} screen -X -S {} quit 2>/dev/null
+                        sleep 1
+                        restore_sni_proxies
+                        echo "✓ SNI Proxies reiniciados"
+                        read -p "ENTER..."
+                        ;;
+                    9)
+                        if [ -f /etc/ssh-vpn/ssl-remote.env ]; then
+                            ssl_remote_stop
+                            sleep 1
+                            source /etc/ssh-vpn/ssl-remote.env
+                            ssl_remote_start "$REMOTE_HOST" "$REMOTE_PORT" "$SNI_HOST" "$LOCAL_OUT_PORT" "$SSH_DEST_PORT"
+                        else
+                            echo "⚠ Sin config SSL Remote guardada"
+                        fi
+                        read -p "ENTER..."
+                        ;;
+                    A|a) restart_all_services; echo ""; read -p "ENTER..." ;;
                 esac
                 ;;
 
             D|d)
                 clear
-                echo -e "${RED}╔══════════════════════════════════════════════╗${NC}"
-                echo -e "${RED}║         DESINSTALAR MSY VPN SCRIPT           ║${NC}"
-                echo -e "${RED}╚══════════════════════════════════════════════╝${NC}"
+                echo -e "\033[1;31m╔══════════════════════════════════════════════╗\033[0m"
+                echo -e "\033[1;31m║         DESINSTALAR MSY VPN SCRIPT           ║\033[0m"
+                echo -e "\033[1;31m╚══════════════════════════════════════════════╝\033[0m"
                 echo ""
-                echo -e "${YELLOW}Esto eliminará todos los servicios, archivos y${NC}"
-                echo -e "${YELLOW}configuraciones instaladas por este script.${NC}"
+                echo -e "\033[1;33mEsto eliminará todos los servicios, archivos y\033[0m"
+                echo -e "\033[1;33mconfiguraciones instaladas por este script.\033[0m"
                 echo ""
                 read -p "¿Confirmar desinstalación? (escribe SI para confirmar): " confirm
                 if [ "$confirm" = "SI" ]; then
@@ -833,7 +902,8 @@ USEREOF
                     for svc in \
                         dropbear-2016-74 dropbear-2019-78 \
                         msy-wrap-143 msy-wrap-142 \
-                        badvpn-udpgw stunnel4 restore-proxies proxy-watchdog hysteria; do
+                        badvpn-udpgw stunnel4 restore-proxies proxy-watchdog \
+                        ssl-remote-proxy hysteria; do
                         systemctl stop    "$svc" 2>/dev/null
                         systemctl disable "$svc" 2>/dev/null
                     done
@@ -841,31 +911,34 @@ USEREOF
                     echo "Eliminando procesos..."
                     pkill -9 -x stunnel4        2>/dev/null
                     pkill -9 -f "proxy.py"      2>/dev/null
+                    pkill -9 -f "proxy_sni.py"  2>/dev/null
+                    pkill -9 -f "ssl-remote"    2>/dev/null
                     pkill -9 -f "badvpn-udpgw"  2>/dev/null
                     pkill -9 -f "dropbear"       2>/dev/null
                     pkill -9 -f "msy-wrap"       2>/dev/null
-                    screen -ls 2>/dev/null | grep "proxy-" | awk '{print $1}' | \
+                    screen -ls 2>/dev/null | grep -E "proxy-|sni-" | awk '{print $1}' | \
                         xargs -I {} screen -X -S {} quit 2>/dev/null
 
-                    for p in 22 80 142 143 443 444 777 7300 8080 8880 8888; do
+                    for p in 22 80 142 143 443 444 777 2443 7300 8080 8880 8888; do
                         fuser -k "${p}/tcp" 2>/dev/null
                         fuser -k "${p}/udp" 2>/dev/null
                     done
 
                     echo "Eliminando archivos del sistema..."
                     for svcf in dropbear-2016-74 dropbear-2019-78 msy-wrap-143 msy-wrap-142 \
-                                badvpn-udpgw restore-proxies proxy-watchdog; do
+                                badvpn-udpgw restore-proxies proxy-watchdog ssl-remote-proxy; do
                         rm -f "/etc/systemd/system/${svcf}.service"
                     done
                     rm -f /usr/local/bin/msy-wrap-*.sh
+                    rm -f /usr/local/bin/ssl-remote-proxy-*.sh
                     systemctl daemon-reload
 
                     rm -rf /opt/dropbear-bins /opt/dropbear-2016 /opt/dropbear-2019
                     rm -f  /usr/bin/badvpn-udpgw
                     rm -rf /etc/dropbear-legacy /etc/proxy-python /etc/ssh-vpn /etc/hysteria 2>/dev/null
 
-                    rm -f /etc/stunnel/stunnel.conf /etc/stunnel/stunnel.pem \
-                          /etc/stunnel/stunnel.key  /etc/stunnel/stunnel.crt
+                    rm -f /etc/stunnel/stunnel.conf /etc/stunnel/ssl-remote.conf \
+                          /etc/stunnel/stunnel.pem /etc/stunnel/stunnel.key /etc/stunnel/stunnel.crt
                     echo "ENABLED=0" > /etc/default/stunnel4 2>/dev/null
 
                     rm -f /root/vpn-installer.sh /root/ssh-vpn-functions.sh \
@@ -892,8 +965,8 @@ USEREOF
                     fi
 
                     echo ""
-                    echo -e "${GREEN}✓ Desinstalación completada${NC}"
-                    echo "  Eliminados: Dropbear 2016/2019, wrappers, BadVPN, Stunnel, Proxies"
+                    echo -e "\033[1;32m✓ Desinstalación completada\033[0m"
+                    echo "  Eliminados: Dropbear 2016/2019, wrappers, BadVPN, Stunnel, Proxies, SNI, SSL Remote"
                     echo "  OpenSSH se mantiene activo en puerto 22"
                     exit 0
                 else
@@ -921,6 +994,69 @@ bash /root/vpn-installer.sh
 SHORTCUT
 chmod +x /usr/local/bin/vpn-panel
 ln -sf /usr/local/bin/vpn-panel /usr/local/bin/vpn-manager
+
+# Inyectar funciones extras de SSL/SNI en ssh-vpn-functions.sh
+if [ -f /tmp/stunnel_extra_functions.sh ]; then
+    cat /tmp/stunnel_extra_functions.sh >> /root/ssh-vpn-functions.sh
+    rm -f /tmp/stunnel_extra_functions.sh
+fi
+
+# restart_all_services ahora incluye SNI y SSL Remote
+cat >> /root/ssh-vpn-functions.sh <<'EXTRASVC'
+
+# Sobrescribir restart_all_services con versión v106
+restart_all_services() {
+    echo "Reiniciando todos los servicios MSY VPN v106..."
+    systemctl restart ssh              && echo "✓ OpenSSH"       || echo "✗ OpenSSH error"
+    systemctl restart dropbear-2016-74 msy-wrap-143 2>/dev/null \
+                                       && echo "✓ Dropbear :143" || echo "✗ Dropbear :143 error"
+    systemctl restart dropbear-2019-78 msy-wrap-142 2>/dev/null \
+                                       && echo "✓ Dropbear :142" || echo "⚠ Dropbear :142 no activo"
+    stunnel_restart 1
+    systemctl restart badvpn-udpgw    && echo "✓ BadVPN"        || echo "✗ BadVPN error"
+    restart_proxies
+    restore_sni_proxies
+    # SSL Remote: solo si hay config guardada
+    if [ -f /etc/ssh-vpn/ssl-remote.env ]; then
+        ssl_remote_stop 2>/dev/null
+        sleep 1
+        source /etc/ssh-vpn/ssl-remote.env
+        ssl_remote_start "$REMOTE_HOST" "$REMOTE_PORT" "$SNI_HOST" "$LOCAL_OUT_PORT" "$SSH_DEST_PORT"
+    fi
+    echo "✓ Listo"
+}
+
+# kill_all_ports v106: incluye SNI y SSL Remote
+kill_all_ports() {
+    echo "Liberando puertos..."
+    for p in 443 444 777; do fuser -k "${p}/tcp" 2>/dev/null; done
+    if [ -f /etc/stunnel/stunnel.conf ]; then
+        while IFS= read -r line; do
+            local p; p=$(echo "$line" | grep -oP ':\K[0-9]+$')
+            [ -n "$p" ] && fuser -k "${p}/tcp" 2>/dev/null
+        done < <(grep "^accept" /etc/stunnel/stunnel.conf)
+    fi
+    if [ -f /etc/proxy-python/proxies.conf ]; then
+        while IFS='|' read -r port _rest; do
+            [ -z "$port" ] && continue
+            fuser -k "${port}/tcp" 2>/dev/null
+        done < /etc/proxy-python/proxies.conf
+    fi
+    if [ -f /etc/proxy-python/sni-proxies.conf ]; then
+        while IFS='|' read -r _tag local_port _rest; do
+            [ -z "$local_port" ] && continue
+            fuser -k "${local_port}/tcp" 2>/dev/null
+        done < /etc/proxy-python/sni-proxies.conf
+    fi
+    [ -f /etc/ssh-vpn/ssl-remote.env ] && source /etc/ssh-vpn/ssl-remote.env
+    [ -n "$LOCAL_OUT_PORT" ] && fuser -k "${LOCAL_OUT_PORT}/tcp" 2>/dev/null
+    for p in 22 143 7300; do
+        fuser -k "${p}/tcp" 2>/dev/null
+        fuser -k "${p}/udp" 2>/dev/null
+    done
+    echo "✓ Puertos liberados"
+}
+EXTRASVC
 
 # Menú automático al login
 sed -i '/MSY VPN/,/fi/d' /root/.bashrc 2>/dev/null
@@ -951,7 +1087,7 @@ CYAN='\033[1;36m'; GREEN='\033[1;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 clear
 echo -e "
 ${CYAN}╔══════════════════════════════════════════════╗${NC}
-${CYAN}║${NC}  ${GREEN}✓ INSTALACIÓN COMPLETADA - v105${NC}          ${CYAN}║${NC}
+${CYAN}║${NC}  ${GREEN}✓ INSTALACIÓN COMPLETADA - v106${NC}          ${CYAN}║${NC}
 ${CYAN}╚══════════════════════════════════════════════╝${NC}
 
 ${YELLOW}IP (IPv4):${NC} ${CYAN}$IP${NC}
@@ -961,9 +1097,11 @@ ${GREEN}SERVICIOS:${NC}
   ✓ Dropbear 2016.74:     puerto :143  ← PRINCIPAL
   ✓ Dropbear 2019.78:     puerto :142  ← SECUNDARIO
   ✓ Stunnel SSL/TLS:      :443, :444, :777
-  ✓ Proxies Python:       :80, :8080, :8880, :8888 → DB:143
+  ✓ Proxies HTTP:         :80, :8080, :8880, :8888
   ✓ BadVPN UDPGW:         UDP :7300
-  ✓ Hysteria UDP:         ver opción 8 del panel
+  ✓ SSH Payload SNI:      Opción 5 del panel
+  ✓ SSL Remote Proxy:     Opción 5 del panel
+  ✓ Hysteria UDP:         Opción 8 del panel
 
 ${YELLOW}CREDENCIALES:${NC}
   Usuario:   $USER_VPN
@@ -973,26 +1111,6 @@ ${YELLOW}PANEL:${NC} comando ${CYAN}vpn-panel${NC} (auto al conectar)
 
 ${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}
 "
-
-cat > /root/vpn-info.txt <<INFOEOF
-MSY VPN SERVER v105
-IP: $IP
-
-SERVICIOS:
-- OpenSSH:          :22
-- Dropbear 2016.74: :143  (principal)
-- Dropbear 2019.78: :142  (secundario)
-- Stunnel:          :443→DB143 | :444→SSH22 | :777→DB143
-- Proxies Python:   :80, :8080, :8880, :8888 → DB:143
-- BadVPN UDPGW:     UDP :7300
-
-USUARIO INICIAL:
-$USER_VPN / $PASS_VPN
-
-COMANDOS:
-- Panel: vpn-panel
-- Desinstalar: opción D del panel
-INFOEOF
 
 sleep 2
 /usr/local/bin/vpn-panel
