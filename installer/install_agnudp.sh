@@ -541,7 +541,7 @@ EOF
         echo "Database setup completed successfully. Table 'users' exists."
         
         # Add a default user if not already exists
-        default_username="WANI"
+        default_username="MSYUDP"
         default_password="@FREEINTERNETVPNMSY"
         user_exists=$(sqlite3 "$USER_DB" "SELECT username FROM users WHERE username='$default_username';")
         
